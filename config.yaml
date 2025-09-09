@@ -1,0 +1,16 @@
+server:
+  port: 5601
+  host: "localhost"
+
+logging:
+  console: true
+  file: "requests.log"
+  binary_files: true
+
+routes:
+  - source: "/api/v1/"
+    destination: "https://openrouter.ai/"
+    name: "openrouter"
+  - source: "/v1/"
+    destination: "https://api.openai.com/"
+    name: "openai"
