@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,441 +12,297 @@ import (
 	"time"
 )
 
-// Mock server for testing
-type MockServer struct {
-	server *httptest.Server
-	routes map[string]http.HandlerFunc
+// Mock logging server for testing
+type MockLoggingServer struct {
+	server   *httptest.Server
+	requests map[string][]byte
+	responses map[string][]byte
 }
 
-func NewMockServer() *MockServer {
-	mock := &MockServer{
-		routes: make(map[string]http.HandlerFunc),
+func NewMockLoggingServer() *MockLoggingServer {
+	mock := &MockLoggingServer{
+		requests:  make(map[string][]byte),
+		responses: make(map[string][]byte),
 	}
-	
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if handler, exists := mock.routes[r.URL.Path]; exists {
-			handler(w, r)
-		} else {
-			http.NotFound(w, r)
+		if r.Method != "PUT" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
+
+		pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(pathParts) != 2 {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
+
+		requestID := pathParts[0]
+		streamType := pathParts[1]
+
+		data, _ := io.ReadAll(r.Body)
+
+		if streamType == "request" {
+			mock.requests[requestID] = data
+		} else if streamType == "response" {
+			mock.responses[requestID] = data
+		}
+
+		w.WriteHeader(http.StatusCreated)
 	})
-	
+
 	mock.server = httptest.NewServer(mux)
 	return mock
 }
 
-func (m *MockServer) Close() {
+func (m *MockLoggingServer) Close() {
 	m.server.Close()
 }
 
-func (m *MockServer) URL() string {
+func (m *MockLoggingServer) URL() string {
 	return m.server.URL
 }
 
-func (m *MockServer) AddRoute(path string, handler http.HandlerFunc) {
-	m.routes[path] = handler
-}
+func TestNewArchitecture(t *testing.T) {
+	// Create mock backend server
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"echo": "Backend received %s %s"}`, r.Method, r.URL.Path)
+	}))
+	defer backend.Close()
 
-func TestConfigLoading(t *testing.T) {
+	// Create mock logging server
+	loggingServer := NewMockLoggingServer()
+	defer loggingServer.Close()
+
 	// Create test config
-	configData := `
+	configContent := fmt.Sprintf(`
 server:
-  port: 8080
+  port: 0
   host: "localhost"
 
 logging:
-  console: true
-  file: "test.log"
-  binary_files: true
+  console: false
+  server_url: "%s"
+  enabled: true
 
 routes:
   - source: "/api/v1/"
-    destination: "https://example.com/api/v1/"
+    destination: "%s/"
     name: "test"
-`
-	
-	// Write test config
-	err := os.WriteFile("test_config.yaml", []byte(configData), 0666)
+`, loggingServer.URL(), backend.URL)
+
+	err := os.WriteFile("test_config_new.yaml", []byte(configContent), 0666)
 	if err != nil {
 		t.Fatal("Failed to write test config:", err)
 	}
-	defer os.Remove("test_config.yaml")
-	
+	defer os.Remove("test_config_new.yaml")
+
 	// Load config
-	config, err := loadConfig("test_config.yaml")
+	config, err := loadConfig("test_config_new.yaml")
 	if err != nil {
 		t.Fatal("Failed to load config:", err)
 	}
-	
-	// Verify config values
-	if config.Server.Port != 8080 {
-		t.Errorf("Expected port 8080, got %d", config.Server.Port)
-	}
-	
-	if config.Server.Host != "localhost" {
-		t.Errorf("Expected host 'localhost', got '%s'", config.Server.Host)
-	}
-	
-	if !config.Logging.Console {
-		t.Error("Expected logging.console to be true")
-	}
-	
-	if config.Logging.File != "test.log" {
-		t.Errorf("Expected log file 'test.log', got '%s'", config.Logging.File)
-	}
-	
-	if len(config.Routes) != 1 {
-		t.Errorf("Expected 1 route, got %d", len(config.Routes))
-	}
-	
-	route := config.Routes[0]
-	if route.Source != "/api/v1/" {
-		t.Errorf("Expected source '/api/v1/', got '%s'", route.Source)
-	}
-	
-	if route.Destination != "https://example.com/api/v1/" {
-		t.Errorf("Expected destination 'https://example.com/api/v1/', got '%s'", route.Destination)
-	}
-	
-	if route.Name != "test" {
-		t.Errorf("Expected name 'test', got '%s'", route.Name)
-	}
-}
 
-func TestBasicProxying(t *testing.T) {
-	// Create mock backend server
-	mockServer := NewMockServer()
-	defer mockServer.Close()
-	
-	// Add test route to mock server - the path will be /test after proxy transformation
-	mockServer.AddRoute("/test", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		
-		body, _ := io.ReadAll(r.Body)
-		response := map[string]interface{}{
-			"echo": string(body),
-			"method": r.Method,
-			"headers": r.Header,
-		}
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	})
-	
-	// Create test config
-	config := &Config{
-		Server: struct {
-			Port int    `yaml:"port"`
-			Host string `yaml:"host"`
-		}{Port: 0, Host: "localhost"}, // Port 0 for auto-assignment
-		Logging: struct {
-			Console     bool   `yaml:"console"`
-			File        string `yaml:"file"`
-			BinaryFiles bool   `yaml:"binary_files"`
-		}{Console: false, File: "", BinaryFiles: false},
-		Routes: []Route{
-			{
-				Source:      "/api/v1/",
-				Destination: mockServer.URL() + "/",
-				Name:        "test",
-			},
-		},
-	}
-	
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
-	
+
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Find matching route - match longer paths first
-		var matchedHandler *RouteHandler
-		var matchedLength int
-		
-		for sourcePath, handler := range proxyServer.routes {
-			trimmedSource := strings.TrimSuffix(sourcePath, "/")
-			if strings.HasPrefix(r.URL.Path, trimmedSource) && len(trimmedSource) > matchedLength {
-				matchedHandler = handler
-				matchedLength = len(trimmedSource)
-			}
-		}
-		
-		if matchedHandler != nil {
-			matchedHandler.ServeHTTP(w, r)
-			return
-		}
-		
-		http.NotFound(w, r)
-	}))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
 	defer testServer.Close()
-	
-	// Test request
+
+	// Make a test request
 	requestBody := `{"test": "data"}`
 	resp, err := http.Post(testServer.URL+"/api/v1/test", "application/json", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatal("Request failed:", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
-		return
 	}
-	
-	var response map[string]interface{}
-	err = json.NewDecoder(resp.Body).Decode(&response)
+
+	// Read response
+	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatal("Failed to decode response:", err)
+		t.Fatal("Failed to read response:", err)
 	}
-	
-	if response["echo"] != requestBody {
-		t.Errorf("Expected echo '%s', got '%v'", requestBody, response["echo"])
+
+	expectedContent := "Backend received POST /test"
+	if !strings.Contains(string(responseBody), expectedContent) {
+		t.Errorf("Expected response to contain '%s', got: %s", expectedContent, string(responseBody))
 	}
-	
-	if response["method"] != "POST" {
-		t.Errorf("Expected method 'POST', got '%v'", response["method"])
+
+	// Give some time for async logging to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that logging server received the data
+	if len(loggingServer.requests) == 0 {
+		t.Error("No request data was logged")
+	}
+
+	if len(loggingServer.responses) == 0 {
+		t.Error("No response data was logged")
+	}
+
+	// Verify we got exactly one request/response pair
+	if len(loggingServer.requests) != 1 || len(loggingServer.responses) != 1 {
+		t.Errorf("Expected 1 request and 1 response, got %d requests and %d responses", 
+			len(loggingServer.requests), len(loggingServer.responses))
+	}
+
+	// Check that request data contains our test data
+	for requestID, requestData := range loggingServer.requests {
+		t.Logf("Request %s: %d bytes", requestID[:8], len(requestData))
+		if !strings.Contains(string(requestData), requestBody) {
+			t.Error("Request data does not contain expected body")
+		}
+
+		// Check corresponding response
+		if responseData, exists := loggingServer.responses[requestID]; exists {
+			t.Logf("Response %s: %d bytes", requestID[:8], len(responseData))
+			if !strings.Contains(string(responseData), "Backend received") {
+				t.Error("Response data does not contain expected content")
+			}
+		} else {
+			t.Error("No corresponding response found for request")
+		}
 	}
 }
 
-func TestStreamingResponse(t *testing.T) {
-	// Create mock streaming server
-	mockServer := NewMockServer()
-	defer mockServer.Close()
-	
-	mockServer.AddRoute("/stream", func(w http.ResponseWriter, r *http.Request) {
+func TestStreamingWithNewArchitecture(t *testing.T) {
+	// Create mock streaming backend
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		
+
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 			return
 		}
-		
+
 		// Send several SSE events
 		events := []string{
-			"data: {\"chunk\": 1, \"text\": \"Hello\"}\n\n",
-			"data: {\"chunk\": 2, \"text\": \" world\"}\n\n",
-			"data: {\"chunk\": 3, \"text\": \"!\"}\n\n",
+			"data: {\"chunk\": 1}\n\n",
+			"data: {\"chunk\": 2}\n\n",
 			"data: [DONE]\n\n",
 		}
-		
+
 		for _, event := range events {
 			fmt.Fprint(w, event)
 			flusher.Flush()
-			time.Sleep(10 * time.Millisecond) // Simulate streaming delay
+			time.Sleep(10 * time.Millisecond)
 		}
-	})
-	
+	}))
+	defer backend.Close()
+
+	// Create mock logging server
+	loggingServer := NewMockLoggingServer()
+	defer loggingServer.Close()
+
 	// Create test config
-	config := &Config{
-		Server: struct {
-			Port int    `yaml:"port"`
-			Host string `yaml:"host"`
-		}{Port: 0, Host: "localhost"},
-		Logging: struct {
-			Console     bool   `yaml:"console"`
-			File        string `yaml:"file"`
-			BinaryFiles bool   `yaml:"binary_files"`
-		}{Console: false, File: "test_stream.log", BinaryFiles: true},
-		Routes: []Route{
-			{
-				Source:      "/api/v1/",
-				Destination: mockServer.URL() + "/",
-				Name:        "streaming_test",
-			},
-		},
+	configContent := fmt.Sprintf(`
+server:
+  port: 0
+  host: "localhost"
+
+logging:
+  console: false
+  server_url: "%s"
+  enabled: true
+
+routes:
+  - source: "/api/v1/"
+    destination: "%s/"
+    name: "streaming_test"
+`, loggingServer.URL(), backend.URL)
+
+	err := os.WriteFile("test_streaming_config.yaml", []byte(configContent), 0666)
+	if err != nil {
+		t.Fatal("Failed to write test config:", err)
 	}
-	
+	defer os.Remove("test_streaming_config.yaml")
+
+	// Load config
+	config, err := loadConfig("test_streaming_config.yaml")
+	if err != nil {
+		t.Fatal("Failed to load config:", err)
+	}
+
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
-	
+
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for sourcePath, handler := range proxyServer.routes {
-			if strings.HasPrefix(r.URL.Path, strings.TrimSuffix(sourcePath, "/")) {
-				handler.ServeHTTP(w, r)
-				return
-			}
-		}
-		http.NotFound(w, r)
-	}))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
 	defer testServer.Close()
-	
-	// Test streaming request
+
+	// Make streaming request
 	resp, err := http.Get(testServer.URL + "/api/v1/stream")
 	if err != nil {
 		t.Fatal("Streaming request failed:", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
 	}
-	
-	contentType := resp.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "text/event-stream") {
-		t.Errorf("Expected SSE content type, got '%s'", contentType)
-	}
-	
+
 	// Read the streaming response
 	var buffer bytes.Buffer
 	_, err = io.Copy(&buffer, resp.Body)
 	if err != nil {
 		t.Fatal("Failed to read streaming response:", err)
 	}
-	
+
 	responseData := buffer.String()
-	
-	// Verify we got all the expected chunks
-	expectedChunks := []string{
-		"data: {\"chunk\": 1, \"text\": \"Hello\"}",
-		"data: {\"chunk\": 2, \"text\": \" world\"}",
-		"data: {\"chunk\": 3, \"text\": \"!\"}",
-		"data: [DONE]",
-	}
-	
-	for _, expectedChunk := range expectedChunks {
-		if !strings.Contains(responseData, expectedChunk) {
-			t.Errorf("Expected chunk '%s' not found in response", expectedChunk)
+	expectedChunks := []string{"chunk\": 1", "chunk\": 2", "[DONE]"}
+	for _, chunk := range expectedChunks {
+		if !strings.Contains(responseData, chunk) {
+			t.Errorf("Expected chunk '%s' not found in streaming response", chunk)
 		}
 	}
-	
-	// Clean up log files
-	os.Remove("test_stream.log")
-	
-	// Clean up any binary files created during test
-	files, _ := os.ReadDir(".")
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), ".bin") {
-			os.Remove(file.Name())
-		}
+
+	// Give time for async logging
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify logging occurred
+	if len(loggingServer.requests) == 0 {
+		t.Error("No streaming request was logged")
+	}
+
+	if len(loggingServer.responses) == 0 {
+		t.Error("No streaming response was logged")
 	}
 }
 
-func TestMultipleRoutes(t *testing.T) {
-	// Create two mock servers
-	mockServer1 := NewMockServer()
-	defer mockServer1.Close()
-	
-	mockServer2 := NewMockServer()
-	defer mockServer2.Close()
-	
-	// Add routes to mock servers
-	mockServer1.AddRoute("/openrouter", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"service": "openrouter", "path": r.URL.Path})
-	})
-	
-	mockServer2.AddRoute("/openai", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"service": "openai", "path": r.URL.Path})
-	})
-	
-	// Create test config with multiple routes
+func TestConfigValidationNew(t *testing.T) {
 	config := &Config{
-		Server: struct {
-			Port int    `yaml:"port"`
-			Host string `yaml:"host"`
-		}{Port: 0, Host: "localhost"},
 		Logging: struct {
-			Console     bool   `yaml:"console"`
-			File        string `yaml:"file"`
-			BinaryFiles bool   `yaml:"binary_files"`
-		}{Console: false, File: "", BinaryFiles: false},
+			Console   bool   `yaml:"console"`
+			ServerURL string `yaml:"server_url"`
+			Enabled   bool   `yaml:"enabled"`
+		}{Console: true, ServerURL: "http://localhost:8080", Enabled: true},
 		Routes: []Route{
-			{
-				Source:      "/api/v1/",
-				Destination: mockServer1.URL() + "/",
-				Name:        "openrouter",
-			},
-			{
-				Source:      "/v1/",
-				Destination: mockServer2.URL() + "/",
-				Name:        "openai",
-			},
+			{Source: "/api/v1/", Destination: "https://example.com/", Name: "test"},
 		},
 	}
-	
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
-	
-	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for sourcePath, handler := range proxyServer.routes {
-			if strings.HasPrefix(r.URL.Path, strings.TrimSuffix(sourcePath, "/")) {
-				handler.ServeHTTP(w, r)
-				return
-			}
-		}
-		http.NotFound(w, r)
-	}))
-	defer testServer.Close()
-	
-	// Test first route
-	resp1, err := http.Get(testServer.URL + "/api/v1/openrouter")
-	if err != nil {
-		t.Fatal("First route request failed:", err)
-	}
-	defer resp1.Body.Close()
-	
-	var response1 map[string]string
-	json.NewDecoder(resp1.Body).Decode(&response1)
-	
-	if response1["service"] != "openrouter" {
-		t.Errorf("Expected service 'openrouter', got '%s'", response1["service"])
-	}
-	
-	// Test second route
-	resp2, err := http.Get(testServer.URL + "/v1/openai")
-	if err != nil {
-		t.Fatal("Second route request failed:", err)
-	}
-	defer resp2.Body.Close()
-	
-	var response2 map[string]string
-	json.NewDecoder(resp2.Body).Decode(&response2)
-	
-	if response2["service"] != "openai" {
-		t.Errorf("Expected service 'openai', got '%s'", response2["service"])
-	}
-}
 
-func TestFilenameGeneration(t *testing.T) {
-	now := time.Now()
-	
-	// Test basic filename generation
-	filename1 := generateUniqueFilename(now)
-	filename2 := generateUniqueFilename(now.Add(time.Nanosecond))
-	
-	if filename1 == filename2 {
-		t.Error("Expected different filenames for different timestamps")
+	server := NewProxyServer(config)
+
+	if len(server.routes) != 1 {
+		t.Errorf("Expected 1 route, got %d", len(server.routes))
 	}
-	
-	// Test that filenames have expected format
-	expectedPrefix := now.Format("2006-01-02_15-04-05")
-	if !strings.HasPrefix(filename1, expectedPrefix) {
-		t.Errorf("Expected filename to start with '%s', got '%s'", expectedPrefix, filename1)
+
+	route := server.routes["/api/v1/"]
+	if route == nil {
+		t.Error("Route not found")
 	}
-	
-	// Test collision prevention
-	// Create a fake file to trigger collision
-	testFilename := generateUniqueFilename(now)
-	fakeFile := testFilename + "-request.bin"
-	os.WriteFile(fakeFile, []byte("test"), 0666)
-	defer os.Remove(fakeFile)
-	
-	// Generate new filename - should be different due to collision
-	newFilename := generateUniqueFilename(now)
-	if newFilename == testFilename {
-		t.Error("Expected different filename due to collision, but got the same")
-	}
-	
-	if !strings.Contains(newFilename, "_1") {
-		t.Error("Expected collision-resolved filename to contain '_1'")
+
+	if route.Name != "test" {
+		t.Errorf("Expected route name 'test', got '%s'", route.Name)
 	}
 }

@@ -3,9 +3,9 @@ server:
   host: "localhost"
 
 logging:
-  console: true
-  file: "requests.log"
-  binary_files: true
+  console: true           # Enable simple console output
+  server_url: "http://localhost:8080"  # Logging server URL
+  enabled: true           # Enable streaming to logging server
 
 routes:
   - source: "/api/v1/"

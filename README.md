@@ -1,68 +1,68 @@
 # OpenRouter Proxy
 
-A high-performance, configurable HTTP proxy designed for logging and proxying requests to AI API endpoints like OpenRouter and OpenAI. Built with Go, it supports streaming responses (SSE), multiple route configurations, and comprehensive request/response logging.
+A high-performance, configurable HTTP proxy with **streaming duplex architecture** designed for real-time logging and proxying requests to AI API endpoints like OpenRouter and OpenAI. Built with Go, it features UUID-based request tracking and streams request/response data to a dedicated logging server without blocking the main proxy pipeline.
 
 ## Features
 
-- 🚀 **High Performance**: Non-blocking, streaming-aware proxy
-- 🔧 **Configurable Routes**: YAML-based configuration for multiple endpoints
-- 📊 **Comprehensive Logging**: Simple console logs + detailed binary file storage
-- 🌊 **Streaming Support**: Full support for SSE and chunked responses
-- 🛡️ **Collision-Safe**: Timestamp-based file naming with automatic collision prevention
-- 🧪 **Well Tested**: Comprehensive test suite covering all functionality
+- 🚀 **Streaming Duplex Architecture**: Real-time request/response streaming with zero performance impact
+- 🆔 **UUID Request Tracking**: Each request gets a unique identifier for complete traceability
+- 🔧 **Configurable Routes**: YAML-based configuration for multiple endpoints  
+- 📊 **Dedicated Logging Server**: Separate server for handling log storage and processing
+- 🌊 **True Streaming Support**: Full support for SSE and chunked responses without buffering
+- ⚡ **Zero-Copy Performance**: Direct streaming with no intermediate buffering
+- 🧪 **Well Tested**: Comprehensive test suite covering all functionality including streaming
 
 ## Architecture
 
-### Core Components
+### Streaming Duplex Design
+
+The proxy implements a streaming duplex architecture where each request is assigned a UUID and both request and response streams are duplicated in real-time:
 
 ```
 ┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
 │   Client Request    │───▶│   Proxy Server      │───▶│  Target API Server  │
 │                     │    │                     │    │                     │
-│ /api/v1/completion  │    │ Route Matching      │    │ /api/v1/completion  │
-└─────────────────────┘    │ Path Transformation │    └─────────────────────┘
-                           │ Logging Transport   │
-                           └─────────────────────┘
-                                     │
-                                     ▼
-                           ┌─────────────────────┐
-                           │   Logging System    │
-                           │                     │
-                           │ • Console Output    │
-                           │ • File Logging      │
-                           │ • Binary Files      │
-                           └─────────────────────┘
+│ POST /api/v1/chat   │    │ 1. Generate UUID    │    │ POST /api/v1/chat   │
+│ {"stream": true}    │    │ 2. Duplex Request   │    │ {"stream": true}    │
+└─────────────────────┘    │ 3. Duplex Response  │    └─────────────────────┘
+           │                └─────────────────────┘                │
+           │                          │                            │
+           │                          ▼                            │
+           │                ┌─────────────────────┐                │
+           │                │  Logging Server     │                │
+           │                │                     │                │
+           │                │ PUT /{uuid}/request │◀───────────────┘
+           │                │ PUT /{uuid}/response│◀───────────────┐
+           │                └─────────────────────┘                │
+           │                                                       │
+           └───────────────── Response Stream ─────────────────────┘
+                            (SSE/Chunked/JSON)
 ```
 
 ### Key Architecture Decisions
 
-1. **Reverse Proxy Pattern**: Uses Go's `httputil.ReverseProxy` for robust HTTP proxying
-2. **Custom Transport**: Implements `http.RoundTripper` for request/response interception
-3. **Streaming-Aware**: Detects and handles SSE responses without buffering
-4. **Asynchronous Logging**: Uses goroutines to prevent blocking the proxy pipeline
-5. **Route-Based Design**: Flexible routing system supporting multiple destinations
+1. **UUID-Based Tracking**: Each request gets a unique identifier for complete traceability
+2. **Stream Duplexing**: Uses `io.TeeReader` and `io.MultiWriter` for real-time stream splitting
+3. **Dedicated Logging Server**: Separate service handles log storage via PUT requests
+4. **Zero Buffering**: Direct streaming with no intermediate storage
+5. **Async Logging**: Goroutines handle logging without blocking the main proxy flow
 
 ### Component Details
 
 #### ProxyServer
-- Central coordinator managing multiple route handlers
-- Loads configuration and initializes routes
-- Handles HTTP server lifecycle
+- Central coordinator managing routes and logging client
+- Generates UUIDs for request tracking
+- Handles stream duplexing for both requests and responses
 
-#### RouteHandler
-- Manages individual route configurations
-- Contains reverse proxy instance and target URL
-- Handles path transformation logic
+#### LoggingClient
+- HTTP client for sending data to the logging server
+- Handles PUT requests to `/{uuid}/request` and `/{uuid}/response`
+- Includes headers and body data in raw HTTP format
 
-#### LoggingTransport
-- Custom HTTP transport implementing `http.RoundTripper`
-- Intercepts requests and responses for logging
-- Handles both regular and streaming responses differently
-
-#### StreamingLogger
-- Wraps response bodies for streaming data capture
-- Accumulates streamed data without blocking the client
-- Triggers logging when stream completes
+#### Stream Duplexing
+- **Request Duplexing**: `io.TeeReader` splits request stream to target and logging server
+- **Response Duplexing**: `io.MultiWriter` duplicates response stream to client and logging server
+- **Real-time Processing**: No buffering, streams data as it flows
 
 ## Configuration
 
@@ -74,9 +74,9 @@ server:
   host: "localhost"       # Host to bind to
 
 logging:
-  console: true           # Enable console output
-  file: "requests.log"    # Log file path (empty to disable)
-  binary_files: true      # Enable binary request/response files
+  console: true           # Enable simple console output
+  server_url: "http://localhost:8080"  # Logging server URL
+  enabled: true           # Enable streaming to logging server
 
 routes:
   - source: "/api/v1/"                    # Source path prefix
@@ -104,18 +104,28 @@ Routes map source paths to destination servers:
 
 ### Quick Start
 
-1. **Configure the proxy** by editing `config.yaml`
-2. **Run the proxy**:
+1. **Start the logging server** (handles log storage):
+   ```bash
+   ./logging-server.exe
+   ```
+   This starts the logging server on port 8080 and creates a `logs/` directory.
+
+2. **Configure the proxy** by editing `config.yaml`
+
+3. **Run the proxy**:
    ```bash
    ./openrouter-proxy.exe
    ```
-3. **Make requests** to the configured endpoints:
+
+4. **Make requests** to the configured endpoints:
    ```bash
    curl -X POST http://localhost:5601/api/v1/chat/completions \
      -H "Content-Type: application/json" \
      -H "Authorization: Bearer YOUR_API_KEY" \
      -d '{"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello!"}]}'
    ```
+
+5. **Check logs** in the `logs/` directory for detailed request/response data
 
 ### Example Configurations
 
@@ -158,27 +168,29 @@ routes:
 
 ## Logging
 
-The proxy provides three levels of logging:
+The proxy provides dual-level logging:
 
-### 1. Console Output
-Real-time request logging:
+### 1. Console Output (Proxy)
+Simple request tracking with UUID:
 ```
-2025-09-09 17:45:32 POST /api/v1/chat/completions -> 200 (1.2s) [openrouter]
-2025-09-09 17:45:45 GET /v1/models -> 200 (340ms) [openai] STREAMING
+2025-09-09 17:45:32 [a1b2c3d4] POST /api/v1/chat/completions -> https://openrouter.ai/ [openrouter]
+2025-09-09 17:45:45 [e5f6g7h8] GET /v1/models -> https://api.openai.com/ [openai]  
 ```
 
-### 2. File Logging
-Same format as console, appended to configured log file.
+### 2. Detailed Logging (Logging Server)
+Complete request/response pairs saved as binary files in `logs/` directory:
+- `2025-09-09_17-45-32.123_a1b2c3d4_request.bin`  - Raw HTTP request (headers + body)
+- `2025-09-09_17-45-32.456_a1b2c3d4_response.bin` - Raw HTTP response (headers + body)
 
-### 3. Binary Files
-Detailed request/response pairs saved as binary files:
-- `2025-09-09_17-45-32-123456789-request.bin`  - Raw request body
-- `2025-09-09_17-45-32-123456789-response.bin` - Raw response body
+**UUID-Based Tracking:**
+- Each request gets a unique UUID (e.g., `a1b2c3d4-1234-5678-9abc-def123456789`)
+- Request and response files share the same UUID for easy pairing
+- Files contain raw HTTP data exactly as sent/received
 
-**File Naming Convention:**
-- `YYYY-MM-DD_HH-MM-SS-NNNNNNNNN` (nanosecond precision)
-- Automatic collision prevention with `_1`, `_2`, etc. suffixes
-- Only created when request/response bodies exist
+**Logging Server API:**
+- `PUT /{uuid}/request` - Receives request data
+- `PUT /{uuid}/response` - Receives response data
+- Data includes HTTP headers and body as binary stream
 
 ## Streaming Support
 
@@ -213,14 +225,18 @@ curl -N http://localhost:5601/api/v1/chat/completions \
 # Install dependencies
 go mod tidy
 
-# Build executable
+# Build main proxy
 go build -o openrouter-proxy.exe .
+
+# Build logging server
+cd cmd && go build -o ../logging-server.exe .
 
 # Run tests
 go test -v
 
 # Cross-compile for Linux
 GOOS=linux GOARCH=amd64 go build -o openrouter-proxy-linux .
+GOOS=linux GOARCH=amd64 go build -o logging-server-linux cmd/logging-server.go
 ```
 
 ## Testing
@@ -228,11 +244,12 @@ GOOS=linux GOARCH=amd64 go build -o openrouter-proxy-linux .
 The project includes comprehensive tests covering:
 
 - ✅ Configuration loading and validation
-- ✅ Basic HTTP proxying
-- ✅ SSE/streaming responses
+- ✅ UUID-based request tracking
+- ✅ Streaming duplex architecture  
+- ✅ SSE/streaming responses with real-time logging
 - ✅ Multiple route handling
 - ✅ Path transformation logic
-- ✅ File naming collision prevention
+- ✅ Logging server integration
 
 Run tests:
 ```bash

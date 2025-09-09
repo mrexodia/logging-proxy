@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,9 +20,9 @@ type Config struct {
 		Host string `yaml:"host"`
 	} `yaml:"server"`
 	Logging struct {
-		Console     bool   `yaml:"console"`
-		File        string `yaml:"file"`
-		BinaryFiles bool   `yaml:"binary_files"`
+		Console   bool   `yaml:"console"`
+		ServerURL string `yaml:"server_url"`
+		Enabled   bool   `yaml:"enabled"`
 	} `yaml:"logging"`
 	Routes []Route `yaml:"routes"`
 }
@@ -35,14 +34,15 @@ type Route struct {
 }
 
 type ProxyServer struct {
-	config *Config
-	routes map[string]*RouteHandler
+	config       *Config
+	routes       map[string]*Route
+	loggingClient *LoggingClient
 }
 
-type RouteHandler struct {
-	route     Route
-	proxy     *httputil.ReverseProxy
-	targetURL *url.URL
+type LoggingClient struct {
+	serverURL string
+	client    *http.Client
+	enabled   bool
 }
 
 func main() {
@@ -73,287 +73,256 @@ func loadConfig(filename string) (*Config, error) {
 func NewProxyServer(config *Config) *ProxyServer {
 	server := &ProxyServer{
 		config: config,
-		routes: make(map[string]*RouteHandler),
+		routes: make(map[string]*Route),
+		loggingClient: &LoggingClient{
+			serverURL: config.Logging.ServerURL,
+			client:    &http.Client{Timeout: 30 * time.Second},
+			enabled:   config.Logging.Enabled,
+		},
 	}
 
-	// Initialize route handlers
-	for _, route := range config.Routes {
-		handler, err := NewRouteHandler(route, config)
-		if err != nil {
-			log.Printf("Error creating handler for route %s: %v", route.Name, err)
-			continue
-		}
-		server.routes[route.Source] = handler
+	// Initialize routes map
+	for i := range config.Routes {
+		server.routes[config.Routes[i].Source] = &config.Routes[i]
 	}
 
 	return server
 }
 
-func NewRouteHandler(route Route, config *Config) (*RouteHandler, error) {
-	targetURL, err := url.Parse(route.Destination)
-	if err != nil {
-		return nil, err
-	}
+// findMatchingRoute finds the best matching route for the given path
+func (s *ProxyServer) findMatchingRoute(path string) *Route {
+	var bestMatch *Route
+	var bestLength int
 
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	
-	// Custom director to modify the request
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = targetURL.Host
-		req.URL.Host = targetURL.Host
-		req.URL.Scheme = targetURL.Scheme
-		
-		// For path replacement, we want to replace the source prefix with the destination prefix
-		sourcePath := strings.TrimSuffix(route.Source, "/")
-		if strings.HasPrefix(req.URL.Path, sourcePath) {
-			// Extract the remaining path after the source prefix
-			remainingPath := strings.TrimPrefix(req.URL.Path, sourcePath)
-			
-			// Parse destination URL to get just the path part (not the full URL)
-			destURL, _ := url.Parse(route.Destination)
-			destPath := strings.TrimSuffix(destURL.Path, "/")
-			
-			// If destination path is empty or just "/", don't add extra path
-			if destPath == "" || destPath == "/" {
-				req.URL.Path = remainingPath
-			} else {
-				req.URL.Path = destPath + remainingPath
-			}
+	for sourcePath, route := range s.routes {
+		trimmedSource := strings.TrimSuffix(sourcePath, "/")
+		if strings.HasPrefix(path, trimmedSource) && len(trimmedSource) > bestLength {
+			bestMatch = route
+			bestLength = len(trimmedSource)
 		}
 	}
 
-	// Custom transport for logging
-	proxy.Transport = &LoggingTransport{
-		Transport: http.DefaultTransport,
-		Config:    config,
-		RouteName: route.Name,
-	}
+	return bestMatch
+}
 
-	return &RouteHandler{
-		route:     route,
-		proxy:     proxy,
-		targetURL: targetURL,
-	}, nil
+// transformPath converts the source path to the destination path
+func transformPath(originalPath, sourcePath, destinationURL string) (string, error) {
+	sourceTrimmed := strings.TrimSuffix(sourcePath, "/")
+	remainingPath := strings.TrimPrefix(originalPath, sourceTrimmed)
+	
+	destURL, err := url.Parse(destinationURL)
+	if err != nil {
+		return "", err
+	}
+	
+	destPath := strings.TrimSuffix(destURL.Path, "/")
+	if destPath == "" || destPath == "/" {
+		return remainingPath, nil
+	}
+	
+	return destPath + remainingPath, nil
 }
 
 func (s *ProxyServer) Start() {
-	// Register route handlers
-	for sourcePath, handler := range s.routes {
-		// Remove trailing slash for pattern matching
-		pattern := strings.TrimSuffix(sourcePath, "/") + "/"
-		http.HandleFunc(pattern, handler.ServeHTTP)
-		
+	// Single handler for all requests
+	http.HandleFunc("/", s.handleRequest)
+	
+	// Display configured routes
+	for sourcePath, route := range s.routes {
 		fmt.Printf("Route: %s -> %s (%s)\n", 
-			sourcePath, handler.route.Destination, handler.route.Name)
+			sourcePath, route.Destination, route.Name)
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port)
 	fmt.Printf("Proxy server starting on %s\n", addr)
-	if s.config.Logging.File != "" {
-		fmt.Printf("Logs will be saved to %s\n", s.config.Logging.File)
+	if s.config.Logging.Enabled {
+		fmt.Printf("Logging server: %s\n", s.config.Logging.ServerURL)
 	}
 	
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-func (h *RouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.proxy.ServeHTTP(w, r)
-}
-
-type LoggingTransport struct {
-	Transport http.RoundTripper
-	Config    *Config
-	RouteName string
-}
-
-func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+// handleRequest processes incoming requests with streaming duplex architecture
+func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	
-	// Read and log request body
-	var requestBody []byte
-	if req.Body != nil {
-		requestBody, _ = io.ReadAll(req.Body)
-		req.Body = io.NopCloser(bytes.NewReader(requestBody))
+	// Find matching route
+	route := s.findMatchingRoute(r.URL.Path)
+	if route == nil {
+		http.NotFound(w, r)
+		return
 	}
 
-	// Perform the actual request
-	resp, err := t.Transport.RoundTrip(req)
-	if err != nil {
-		return resp, err
-	}
-
-	// For streaming responses (SSE), we need to handle them differently
-	isStreaming := isStreamingResponse(resp)
-	var responseBody []byte
+	// Generate unique request ID
+	requestID := uuid.New().String()
 	
-	if !isStreaming {
-		// Read response body for logging (non-streaming)
-		if resp.Body != nil {
-			responseBody, _ = io.ReadAll(resp.Body)
-			resp.Body = io.NopCloser(bytes.NewReader(responseBody))
+	if s.config.Logging.Console {
+		fmt.Printf("%s [%s] %s %s -> %s [%s]\n", 
+			start.Format("2006-01-02 15:04:05"),
+			requestID[:8], 
+			r.Method, 
+			r.URL.Path, 
+			route.Destination, 
+			route.Name)
+	}
+
+	// Transform the path
+	targetPath, err := transformPath(r.URL.Path, route.Source, route.Destination)
+	if err != nil {
+		http.Error(w, "Invalid destination URL", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse target URL
+	targetURL, err := url.Parse(route.Destination)
+	if err != nil {
+		http.Error(w, "Invalid destination URL", http.StatusInternalServerError)
+		return
+	}
+	
+	// Build target URL
+	targetURL.Path = targetPath
+	targetURL.RawQuery = r.URL.RawQuery
+
+	// Create the duplex streaming proxy request
+	err = s.proxyWithDuplex(w, r, targetURL, requestID, route.Name)
+	if err != nil {
+		log.Printf("Proxy error for %s: %v", requestID, err)
+		http.Error(w, "Proxy error", http.StatusBadGateway)
+	}
+}
+
+// proxyWithDuplex handles the duplex streaming proxy logic
+func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, requestID, routeName string) error {
+	// Create the request to the target server
+	proxyReq, err := http.NewRequest(originalReq.Method, targetURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to create proxy request: %w", err)
+	}
+
+	// Copy headers from original request
+	for key, values := range originalReq.Header {
+		for _, value := range values {
+			proxyReq.Header.Add(key, value)
+		}
+	}
+
+	// Handle request body with duplex streaming
+	if originalReq.Body != nil && s.loggingClient.enabled {
+		// Create a pipe for the logging stream
+		logPipeReader, logPipeWriter := io.Pipe()
+		
+		// Start async logging of request
+		go s.streamToLoggingServer(logPipeReader, requestID, "request", originalReq.Header)
+		
+		// Use TeeReader to duplicate the stream
+		teeReader := io.TeeReader(originalReq.Body, logPipeWriter)
+		proxyReq.Body = &requestBodyCloser{
+			Reader:     teeReader,
+			original:   originalReq.Body,
+			pipeWriter: logPipeWriter,
 		}
 	} else {
-		// For streaming, we'll create a tee reader to capture data as it flows
-		resp.Body = &StreamingLogger{
-			ReadCloser: resp.Body,
-			Config:     t.Config,
-			Timestamp:  start,
-			Method:     req.Method,
-			Path:       req.URL.Path,
-			StatusCode: resp.StatusCode,
-			RouteName:  t.RouteName,
-			RequestBody: requestBody,
-		}
-		// Don't read the body here, let it stream through
+		// Simple case - just forward the request body
+		proxyReq.Body = originalReq.Body
 	}
 
-	duration := time.Since(start)
-
-	// Log asynchronously to avoid blocking (for non-streaming responses)
-	if !isStreaming {
-		go t.logRequestResponse(start, req.Method, req.URL.Path, resp.StatusCode, duration, requestBody, responseBody)
+	// Make the request to target server
+	client := &http.Client{}
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		return fmt.Errorf("proxy request failed: %w", err)
 	}
+	defer resp.Body.Close()
 
-	return resp, nil
-}
-
-func (t *LoggingTransport) logRequestResponse(timestamp time.Time, method, path string, statusCode int, duration time.Duration, requestBody, responseBody []byte) {
-	// Simple console and file log
-	logLine := fmt.Sprintf("%s %s %s -> %d (%s) [%s]\n", 
-		timestamp.Format("2006-01-02 15:04:05"), 
-		method, 
-		path, 
-		statusCode, 
-		duration,
-		t.RouteName)
-	
-	if t.Config.Logging.Console {
-		fmt.Print(logLine)
-	}
-	
-	// Append to log file
-	if t.Config.Logging.File != "" {
-		if file, err := os.OpenFile(t.Config.Logging.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
-			file.WriteString(logLine)
-			file.Close()
+	// Copy response headers to client
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
 		}
 	}
+	w.WriteHeader(resp.StatusCode)
 
-	// Create binary files for request/response data
-	if t.Config.Logging.BinaryFiles {
-		baseFilename := generateUniqueFilename(timestamp)
+	// Handle response body with duplex streaming
+	if s.loggingClient.enabled {
+		// Create a pipe for the logging stream
+		logPipeReader, logPipeWriter := io.Pipe()
 		
-		// Save request
-		if len(requestBody) > 0 {
-			os.WriteFile(baseFilename+"-request.bin", requestBody, 0666)
-		}
+		// Start async logging of response
+		go s.streamToLoggingServer(logPipeReader, requestID, "response", resp.Header)
 		
-		// Save response
-		if len(responseBody) > 0 {
-			os.WriteFile(baseFilename+"-response.bin", responseBody, 0666)
-		}
-	}
-}
-
-func isStreamingResponse(resp *http.Response) bool {
-	contentType := resp.Header.Get("Content-Type")
-	return strings.Contains(contentType, "text/event-stream") || 
-		   strings.Contains(contentType, "application/stream") ||
-		   resp.Header.Get("Transfer-Encoding") == "chunked"
-}
-
-// StreamingLogger wraps a ReadCloser to log streaming data
-type StreamingLogger struct {
-	io.ReadCloser
-	Config      *Config
-	Timestamp   time.Time
-	Method      string
-	Path        string
-	StatusCode  int
-	RouteName   string
-	RequestBody []byte
-	buffer      bytes.Buffer
-	logged      bool
-}
-
-func (s *StreamingLogger) Read(p []byte) (int, error) {
-	n, err := s.ReadCloser.Read(p)
-	
-	// Capture the data as it streams
-	if n > 0 {
-		s.buffer.Write(p[:n])
+		// Use MultiWriter to duplicate the stream to both client and logging
+		multiWriter := io.MultiWriter(w, logPipeWriter)
+		
+		// Stream response to both destinations
+		_, err = io.Copy(multiWriter, resp.Body)
+		logPipeWriter.Close() // Signal end of stream to logger
+	} else {
+		// Simple case - just stream to client
+		_, err = io.Copy(w, resp.Body)
 	}
 	
-	// If this is the end of the stream, log everything
-	if err == io.EOF && !s.logged {
-		s.logged = true
-		duration := time.Since(s.Timestamp)
+	return err
+}
+
+// requestBodyCloser wraps a TeeReader and handles proper cleanup for request bodies
+type requestBodyCloser struct {
+	io.Reader
+	original   io.ReadCloser
+	pipeWriter *io.PipeWriter
+}
+
+func (r *requestBodyCloser) Close() error {
+	r.pipeWriter.Close()
+	return r.original.Close()
+}
+
+// streamToLoggingServer sends the raw HTTP data to the logging server
+func (s *ProxyServer) streamToLoggingServer(reader io.Reader, requestID, streamType string, headers http.Header) {
+	if !s.loggingClient.enabled {
+		return
+	}
+
+	// Create a pipe for streaming the data
+	pipeReader, pipeWriter := io.Pipe()
+	
+	// Start a goroutine to write headers and body to the pipe
+	go func() {
+		defer pipeWriter.Close()
 		
-		logLine := fmt.Sprintf("%s %s %s -> %d (%s) [%s] STREAMING\n", 
-			s.Timestamp.Format("2006-01-02 15:04:05"), 
-			s.Method, 
-			s.Path, 
-			s.StatusCode, 
-			duration,
-			s.RouteName)
-		
-		if s.Config.Logging.Console {
-			fmt.Print(logLine)
-		}
-		
-		if s.Config.Logging.File != "" {
-			if file, err := os.OpenFile(s.Config.Logging.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
-				file.WriteString(logLine)
-				file.Close()
+		// First, write the headers
+		for key, values := range headers {
+			for _, value := range values {
+				fmt.Fprintf(pipeWriter, "%s: %s\r\n", key, value)
 			}
 		}
-
-		// Save binary files
-		if s.Config.Logging.BinaryFiles {
-			baseFilename := generateUniqueFilename(s.Timestamp)
-			
-			if len(s.RequestBody) > 0 {
-				os.WriteFile(baseFilename+"-request.bin", s.RequestBody, 0666)
-			}
-			
-			if s.buffer.Len() > 0 {
-				os.WriteFile(baseFilename+"-response.bin", s.buffer.Bytes(), 0666)
-			}
+		fmt.Fprintf(pipeWriter, "\r\n") // Empty line separating headers from body
+		
+		// Stream the body
+		_, err := io.Copy(pipeWriter, reader)
+		if err != nil {
+			log.Printf("Error streaming %s data for %s: %v", streamType, requestID, err)
 		}
+	}()
+
+	// Send to logging server using the pipe
+	url := fmt.Sprintf("%s/%s/%s", s.loggingClient.serverURL, requestID, streamType)
+	req, err := http.NewRequest("PUT", url, pipeReader)
+	if err != nil {
+		log.Printf("Error creating logging request for %s %s: %v", requestID, streamType, err)
+		return
 	}
-	
-	return n, err
-}
 
-func generateUniqueFilename(t time.Time) string {
-	baseFormat := t.Format("2006-01-02_15-04-05")
-	nanoseconds := t.Nanosecond()
+	req.Header.Set("Content-Type", "application/octet-stream")
 	
-	filename := fmt.Sprintf("%s-%09d", baseFormat, nanoseconds)
-	
-	// Check if files with this base name already exist, add counter if needed
-	counter := 0
-	for {
-		testName := filename
-		if counter > 0 {
-			testName = fmt.Sprintf("%s_%d", filename, counter)
-		}
-		
-		// Check if either request or response file exists
-		requestExists := fileExists(testName + "-request.bin")
-		responseExists := fileExists(testName + "-response.bin")
-		
-		if !requestExists && !responseExists {
-			return testName
-		}
-		
-		counter++
+	resp, err := s.loggingClient.client.Do(req)
+	if err != nil {
+		log.Printf("Error sending %s log for %s: %v", streamType, requestID, err)
+		return
 	}
-}
+	defer resp.Body.Close()
 
-func fileExists(filename string) bool {
-	_, err := os.Stat(filename)
-	return !os.IsNotExist(err)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		log.Printf("Logging server returned %d for %s %s", resp.StatusCode, requestID, streamType)
+	}
 }
