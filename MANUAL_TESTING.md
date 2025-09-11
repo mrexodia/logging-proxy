@@ -15,10 +15,10 @@ This guide provides step-by-step instructions for manually testing the OpenRoute
 
 ```bash
 # Build main proxy
-go build -o openrouter-proxy.exe .
+go build .
 
 # Build logging server
-cd cmd && go build -o ../logging-server.exe .
+cd cmd && go build .
 cd ..
 ```
 
@@ -26,7 +26,7 @@ cd ..
 
 **Terminal 1 - Logging Server:**
 ```bash
-./logging-server.exe
+./logging-server
 ```
 You should see:
 ```
@@ -36,7 +36,7 @@ Saving logs to ./logs/ directory
 
 **Terminal 2 - Proxy Server:**
 ```bash
-./openrouter-proxy.exe
+./openrouter-proxy
 ```
 You should see:
 ```

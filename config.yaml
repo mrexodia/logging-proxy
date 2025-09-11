@@ -5,6 +5,7 @@ server:
 logging:
   console: true           # Enable simple console output
   server_url: "http://localhost:8080"  # Logging server URL
+  default: true           # Default logging behavior for routes and unknown requests
 
 routes:
   openrouter:

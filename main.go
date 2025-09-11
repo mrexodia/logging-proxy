@@ -22,6 +22,7 @@ type Config struct {
 	Logging struct {
 		Console   bool   `yaml:"console"`
 		ServerURL string `yaml:"server_url"`
+		Default   bool   `yaml:"default"`
 	} `yaml:"logging"`
 	Routes map[string]Route `yaml:"routes"`
 }
@@ -148,19 +149,41 @@ func (s *ProxyServer) Start() {
 func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	
-	// Find matching route
-	route := s.findMatchingRoute(r.URL.Path)
-	if route == nil {
-		http.NotFound(w, r)
-		return
-	}
-
 	// Generate unique request ID
 	requestID := uuid.New().String()
 	
+	// Find matching route
+	route := s.findMatchingRoute(r.URL.Path)
+	if route == nil {
+		// Log unknown route to console if console logging is enabled
+		if s.config.Logging.Console {
+			loggingStatus := "no-log"
+			if s.config.Logging.Default {
+				loggingStatus = "log"
+			}
+			fmt.Printf("%s [%s] %s %s -> NOT_FOUND [%s]\n", 
+				start.Format("2006-01-02 15:04:05"),
+				requestID[:8], 
+				r.Method, 
+				r.URL.Path,
+				loggingStatus)
+		}
+		
+		// If default logging is enabled, log the 404 request/response
+		if s.config.Logging.Default {
+			s.logUnknownRoute(w, r, requestID)
+		} else {
+			http.NotFound(w, r)
+		}
+		return
+	}
+
+	// Determine if this route should be logged
+	shouldLog := route.Logging
+
 	if s.config.Logging.Console {
 		loggingStatus := "no-log"
-		if route.Logging {
+		if shouldLog {
 			loggingStatus = "log"
 		}
 		fmt.Printf("%s [%s] %s %s -> %s [%s]\n", 
@@ -191,45 +214,93 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	targetURL.RawQuery = r.URL.RawQuery
 
 	// Create the duplex streaming proxy request
-	err = s.proxyWithDuplex(w, r, targetURL, requestID, route)
+	err = s.proxyWithDuplex(w, r, targetURL, requestID, route, shouldLog)
 	if err != nil {
 		log.Printf("Proxy error for %s: %v", requestID, err)
 		http.Error(w, "Proxy error", http.StatusBadGateway)
 	}
 }
 
+// logUnknownRoute handles logging for routes that are not found
+func (s *ProxyServer) logUnknownRoute(w http.ResponseWriter, r *http.Request, requestID string) {
+	// Create a fake 404 response for logging
+	proxyPath := fmt.Sprintf("http://%s:%d%s", s.config.Server.Host, s.config.Server.Port, r.URL.Path)
+	if r.URL.RawQuery != "" {
+		proxyPath += "?" + r.URL.RawQuery
+	}
+	
+	// Log the request
+	go s.streamToLoggingServer(r.Body, requestID, "request", r, proxyPath, nil)
+	
+	// Create and log the 404 response
+	w.WriteHeader(http.StatusNotFound)
+	responseBody := "404 page not found\n"
+	
+	// Create a fake response for logging
+	fakeResp := &http.Response{
+		Proto:      "HTTP/1.1",
+		StatusCode: http.StatusNotFound,
+		Header:     w.Header(),
+	}
+	
+	// Log the 404 response
+	go s.streamToLoggingServer(strings.NewReader(responseBody), requestID, "response", nil, "", fakeResp)
+	
+	// Write the actual response
+	w.Write([]byte(responseBody))
+}
+
 // proxyWithDuplex handles the duplex streaming proxy logic
-func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, requestID string, route *Route) error {
+func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, requestID string, route *Route, shouldLog bool) error {
 	// Create the request to the target server
 	proxyReq, err := http.NewRequest(originalReq.Method, targetURL.String(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy request: %w", err)
 	}
 
-	// Copy headers from original request
+	// Copy headers from original request, updating Host header value
 	for key, values := range originalReq.Header {
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
+		if strings.ToLower(key) == "host" {
+			// Update Host header to point to destination
+			proxyReq.Header.Set(key, targetURL.Host)
+		} else {
+			for _, value := range values {
+				proxyReq.Header.Add(key, value)
+			}
 		}
 	}
+	
+	// Ensure Host field is also set (Go HTTP client requirement)
+	proxyReq.Host = targetURL.Host
 
-	// Handle request body with duplex streaming
-	if originalReq.Body != nil && route.Logging {
-		// Create a pipe for the logging stream
-		logPipeReader, logPipeWriter := io.Pipe()
+	// Handle request body and logging
+	if shouldLog {
+		// Construct the original proxy path for the X-Proxy-Path header
+		proxyPath := fmt.Sprintf("http://%s:%d%s", s.config.Server.Host, s.config.Server.Port, originalReq.URL.Path)
+		if originalReq.URL.RawQuery != "" {
+			proxyPath += "?" + originalReq.URL.RawQuery
+		}
 		
-		// Start async logging of request
-		go s.streamToLoggingServer(logPipeReader, requestID, "request", originalReq.Header)
-		
-		// Use TeeReader to duplicate the stream
-		teeReader := io.TeeReader(originalReq.Body, logPipeWriter)
-		proxyReq.Body = &requestBodyCloser{
-			Reader:     teeReader,
-			original:   originalReq.Body,
-			pipeWriter: logPipeWriter,
+		if originalReq.Body != nil {
+			// Create a pipe for logging the request body
+			logPipeReader, logPipeWriter := io.Pipe()
+			
+			// Start async logging
+			go s.streamToLoggingServer(logPipeReader, requestID, "request", proxyReq, proxyPath, nil)
+			
+			// Use TeeReader to duplicate the stream
+			teeReader := io.TeeReader(originalReq.Body, logPipeWriter)
+			proxyReq.Body = &requestBodyCloser{
+				Reader:     teeReader,
+				original:   originalReq.Body,
+				pipeWriter: logPipeWriter,
+			}
+		} else {
+			// Log request without body
+			go s.streamToLoggingServer(nil, requestID, "request", proxyReq, proxyPath, nil)
+			proxyReq.Body = originalReq.Body
 		}
 	} else {
-		// Simple case - just forward the request body
 		proxyReq.Body = originalReq.Body
 	}
 
@@ -249,13 +320,13 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// Handle response body with duplex streaming
-	if route.Logging {
-		// Create a pipe for the logging stream
+	// Handle response body and logging
+	if shouldLog {
+		// Create a pipe for logging the response body
 		logPipeReader, logPipeWriter := io.Pipe()
 		
 		// Start async logging of response
-		go s.streamToLoggingServer(logPipeReader, requestID, "response", resp.Header)
+		go s.streamToLoggingServer(logPipeReader, requestID, "response", nil, "", resp)
 		
 		// Use MultiWriter to duplicate the stream to both client and logging
 		multiWriter := io.MultiWriter(w, logPipeWriter)
@@ -283,49 +354,101 @@ func (r *requestBodyCloser) Close() error {
 	return r.original.Close()
 }
 
-// streamToLoggingServer sends the raw HTTP data to the logging server
-func (s *ProxyServer) streamToLoggingServer(reader io.Reader, requestID, streamType string, headers http.Header) {
-
+// streamToLoggingServer sends HTTP request/response data to the logging server
+func (s *ProxyServer) streamToLoggingServer(reader io.Reader, requestID, streamType string, req *http.Request, proxyPath string, resp *http.Response) {
 	// Create a pipe for streaming the data
 	pipeReader, pipeWriter := io.Pipe()
 	
-	// Start a goroutine to write headers and body to the pipe
+	// Start a goroutine to write the HTTP data to the pipe
 	go func() {
 		defer pipeWriter.Close()
 		
-		// First, write the headers
-		for key, values := range headers {
-			for _, value := range values {
-				fmt.Fprintf(pipeWriter, "%s: %s\r\n", key, value)
+		if streamType == "request" && req != nil {
+			// Write request line
+			requestURI := req.URL.Path
+			if req.URL.RawQuery != "" {
+				requestURI += "?" + req.URL.RawQuery
+			}
+			fmt.Fprintf(pipeWriter, "%s %s %s\r\n", req.Method, requestURI, req.Proto)
+			
+			// Write headers that Go handles specially (not in req.Header map)
+			
+			// Host header - always available via req.Host
+			if req.Host != "" {
+				fmt.Fprintf(pipeWriter, "Host: %s\r\n", req.Host)
+			}
+			
+			// Content-Length header - Go calculates this automatically
+			// It may not be in req.Header but is available via req.ContentLength
+			// Only add if not already in headers and we have a positive content length
+			if req.ContentLength > 0 && req.Header.Get("Content-Length") == "" {
+				fmt.Fprintf(pipeWriter, "Content-Length: %d\r\n", req.ContentLength)
+			}
+			
+			// Transfer-Encoding header - Go handles this automatically
+			// Usually not in req.Header when it's "chunked"
+			if len(req.TransferEncoding) > 0 {
+				fmt.Fprintf(pipeWriter, "Transfer-Encoding: %s\r\n", strings.Join(req.TransferEncoding, ", "))
+			}
+			
+			// Write other headers preserving original order but with updated values
+			for name, values := range req.Header {
+				// Skip headers we handle specially above
+				lowerName := strings.ToLower(name)
+				if lowerName != "host" && lowerName != "content-length" && lowerName != "transfer-encoding" {
+					for _, value := range values {
+						fmt.Fprintf(pipeWriter, "%s: %s\r\n", name, value)
+					}
+				}
+			}
+			
+			// Add custom proxy path header for replay capability
+			if proxyPath != "" {
+				fmt.Fprintf(pipeWriter, "X-Proxy-Path: %s\r\n", proxyPath)
+			}
+			
+		} else if streamType == "response" && resp != nil {
+			// Write response status line
+			statusText := http.StatusText(resp.StatusCode)
+			fmt.Fprintf(pipeWriter, "%s %d %s\r\n", resp.Proto, resp.StatusCode, statusText)
+			
+			// Write headers preserving original order
+			for name, values := range resp.Header {
+				for _, value := range values {
+					fmt.Fprintf(pipeWriter, "%s: %s\r\n", name, value)
+				}
 			}
 		}
+		
 		fmt.Fprintf(pipeWriter, "\r\n") // Empty line separating headers from body
 		
-		// Stream the body
-		_, err := io.Copy(pipeWriter, reader)
-		if err != nil {
-			log.Printf("Error streaming %s data for %s: %v", streamType, requestID, err)
+		// Stream the body if present
+		if reader != nil {
+			_, err := io.Copy(pipeWriter, reader)
+			if err != nil {
+				log.Printf("Error streaming %s data for %s: %v", streamType, requestID, err)
+			}
 		}
 	}()
 
 	// Send to logging server using the pipe
 	url := fmt.Sprintf("%s/%s/%s", s.loggingClient.serverURL, requestID, streamType)
-	req, err := http.NewRequest("PUT", url, pipeReader)
+	logReq, err := http.NewRequest("PUT", url, pipeReader)
 	if err != nil {
 		log.Printf("Error creating logging request for %s %s: %v", requestID, streamType, err)
 		return
 	}
 
-	req.Header.Set("Content-Type", "application/octet-stream")
+	logReq.Header.Set("Content-Type", "application/octet-stream")
 	
-	resp, err := s.loggingClient.client.Do(req)
+	logResp, err := s.loggingClient.client.Do(logReq)
 	if err != nil {
 		log.Printf("Error sending %s log for %s: %v", streamType, requestID, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer logResp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		log.Printf("Logging server returned %d for %s %s", resp.StatusCode, requestID, streamType)
+	if logResp.StatusCode != http.StatusOK && logResp.StatusCode != http.StatusCreated {
+		log.Printf("Logging server returned %d for %s %s", logResp.StatusCode, streamType, requestID)
 	}
 }

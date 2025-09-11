@@ -106,7 +106,7 @@ Routes map source paths to destination servers:
 
 1. **Start the logging server** (handles log storage):
    ```bash
-   ./logging-server.exe
+   ./logging-server
    ```
    This starts the logging server on port 8080 and creates a `logs/` directory.
 
@@ -114,7 +114,7 @@ Routes map source paths to destination servers:
 
 3. **Run the proxy**:
    ```bash
-   ./openrouter-proxy.exe
+   ./openrouter-proxy
    ```
 
 4. **Make requests** to the configured endpoints:
@@ -226,17 +226,17 @@ curl -N http://localhost:5601/api/v1/chat/completions \
 go mod tidy
 
 # Build main proxy
-go build -o openrouter-proxy.exe .
+go build .
 
 # Build logging server
-cd cmd && go build -o ../logging-server.exe .
+cd cmd && go build .
 
 # Run tests
 go test -v
 
 # Cross-compile for Linux
-GOOS=linux GOARCH=amd64 go build -o openrouter-proxy-linux .
-GOOS=linux GOARCH=amd64 go build -o logging-server-linux cmd/logging-server.go
+GOOS=linux GOARCH=amd64 go build .
+cd cmd && GOOS=linux GOARCH=amd64 go build .
 ```
 
 ## Testing
@@ -302,3 +302,14 @@ Enable verbose logging by setting `console: true` in configuration.
 ## License
 
 This project is open source. See LICENSE file for details.
+
+## Missing
+
+- Metadata endpoint
+- Logging UI
+  - Simple frontend showing a list of requests
+  - Websocket for live feed
+  - Support live tailing requests/responses (websocket/SSE)
+  - Refactor REST API for logging
+- Look at using a custom `Transport` to simplify full request/response logging
+- Test if websockets work properly
