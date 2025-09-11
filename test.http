@@ -1,3 +1,5 @@
+### Directly request to LM Studio
+
 POST http://127.0.0.1:1234/v1/chat/completions
 Content-Type: application/json
 Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -7,17 +9,12 @@ Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   "messages": [
     {
       "role": "user",
-      "content": "Who are you?"
+      "content": "How does streaming with an OpenAI /v1/chat/completions endpoint work?"
     }
   ]
 }
 
-###
-
-GET http://127.0.0.1:5601/lmstudio/v1/models
-Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-### Regular request
+### Request through the proxy
 
 POST http://127.0.0.1:5601/lmstudio/v1/chat/completions
 Content-Type: application/json
@@ -33,7 +30,7 @@ Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   ]
 }
 
-### Streaming
+### Streaming request through the proxy
 
 POST http://127.0.0.1:5601/lmstudio/v1/chat/completions
 Content-Type: application/json
@@ -50,6 +47,12 @@ Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   "stream": true
 }
 
-###
+### Get list of models
+
+GET http://127.0.0.1:5601/lmstudio/v1/models
+Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+### Unknown route test (404)
 
 GET http://127.0.0.1:5601/unknown/test
+Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
