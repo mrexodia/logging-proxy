@@ -11,6 +11,6 @@ routes:
   - source: "/api/v1/"
     destination: "https://openrouter.ai/"
     name: "openrouter"
-  - source: "/v1/"
-    destination: "https://api.openai.com/"
+  - source: "/lmstudio"
+    destination: "http://127.0.0.1:1234/"
     name: "openai"

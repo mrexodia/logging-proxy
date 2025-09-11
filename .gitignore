@@ -5,6 +5,9 @@
 *.so
 *.dylib
 openrouter-proxy
+logging-server
+
+logs/
 
 # Test binary, built with `go test -c`
 *.test
