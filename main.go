@@ -22,15 +22,14 @@ type Config struct {
 	Logging struct {
 		Console   bool   `yaml:"console"`
 		ServerURL string `yaml:"server_url"`
-		Enabled   bool   `yaml:"enabled"`
 	} `yaml:"logging"`
-	Routes []Route `yaml:"routes"`
+	Routes map[string]Route `yaml:"routes"`
 }
 
 type Route struct {
 	Source      string `yaml:"source"`
 	Destination string `yaml:"destination"`
-	Name        string `yaml:"name"`
+	Logging     bool   `yaml:"logging"`
 }
 
 type ProxyServer struct {
@@ -77,13 +76,14 @@ func NewProxyServer(config *Config) *ProxyServer {
 		loggingClient: &LoggingClient{
 			serverURL: config.Logging.ServerURL,
 			client:    &http.Client{Timeout: 30 * time.Second},
-			enabled:   config.Logging.Enabled,
+			enabled:   true, // Will be checked per-route now
 		},
 	}
 
-	// Initialize routes map
-	for i := range config.Routes {
-		server.routes[config.Routes[i].Source] = &config.Routes[i]
+	// Initialize routes map from the config map
+	for _, route := range config.Routes {
+		routeCopy := route // Make a copy to avoid pointer issues
+		server.routes[route.Source] = &routeCopy
 	}
 
 	return server
@@ -129,15 +129,17 @@ func (s *ProxyServer) Start() {
 	
 	// Display configured routes
 	for sourcePath, route := range s.routes {
+		loggingStatus := "logging disabled"
+		if route.Logging {
+			loggingStatus = "logging enabled"
+		}
 		fmt.Printf("Route: %s -> %s (%s)\n", 
-			sourcePath, route.Destination, route.Name)
+			sourcePath, route.Destination, loggingStatus)
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port)
 	fmt.Printf("Proxy server starting on %s\n", addr)
-	if s.config.Logging.Enabled {
-		fmt.Printf("Logging server: %s\n", s.config.Logging.ServerURL)
-	}
+	fmt.Printf("Logging server: %s\n", s.config.Logging.ServerURL)
 	
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
@@ -157,13 +159,17 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	requestID := uuid.New().String()
 	
 	if s.config.Logging.Console {
+		loggingStatus := "no-log"
+		if route.Logging {
+			loggingStatus = "log"
+		}
 		fmt.Printf("%s [%s] %s %s -> %s [%s]\n", 
 			start.Format("2006-01-02 15:04:05"),
 			requestID[:8], 
 			r.Method, 
 			r.URL.Path, 
 			route.Destination, 
-			route.Name)
+			loggingStatus)
 	}
 
 	// Transform the path
@@ -185,7 +191,7 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	targetURL.RawQuery = r.URL.RawQuery
 
 	// Create the duplex streaming proxy request
-	err = s.proxyWithDuplex(w, r, targetURL, requestID, route.Name)
+	err = s.proxyWithDuplex(w, r, targetURL, requestID, route)
 	if err != nil {
 		log.Printf("Proxy error for %s: %v", requestID, err)
 		http.Error(w, "Proxy error", http.StatusBadGateway)
@@ -193,7 +199,7 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyWithDuplex handles the duplex streaming proxy logic
-func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, requestID, routeName string) error {
+func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, requestID string, route *Route) error {
 	// Create the request to the target server
 	proxyReq, err := http.NewRequest(originalReq.Method, targetURL.String(), nil)
 	if err != nil {
@@ -208,7 +214,7 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 	}
 
 	// Handle request body with duplex streaming
-	if originalReq.Body != nil && s.loggingClient.enabled {
+	if originalReq.Body != nil && route.Logging {
 		// Create a pipe for the logging stream
 		logPipeReader, logPipeWriter := io.Pipe()
 		
@@ -244,7 +250,7 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 	w.WriteHeader(resp.StatusCode)
 
 	// Handle response body with duplex streaming
-	if s.loggingClient.enabled {
+	if route.Logging {
 		// Create a pipe for the logging stream
 		logPipeReader, logPipeWriter := io.Pipe()
 		
@@ -279,9 +285,6 @@ func (r *requestBodyCloser) Close() error {
 
 // streamToLoggingServer sends the raw HTTP data to the logging server
 func (s *ProxyServer) streamToLoggingServer(reader io.Reader, requestID, streamType string, headers http.Header) {
-	if !s.loggingClient.enabled {
-		return
-	}
 
 	// Create a pipe for streaming the data
 	pipeReader, pipeWriter := io.Pipe()

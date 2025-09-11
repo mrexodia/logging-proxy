@@ -5,12 +5,13 @@ server:
 logging:
   console: true           # Enable simple console output
   server_url: "http://localhost:8080"  # Logging server URL
-  enabled: true           # Enable streaming to logging server
 
 routes:
-  - source: "/api/v1/"
+  openrouter:
+    source: "/api/v1/"
     destination: "https://openrouter.ai/"
-    name: "openrouter"
-  - source: "/lmstudio"
+    logging: true
+  lmstudio:
+    source: "/lmstudio"
     destination: "http://127.0.0.1:1234/"
-    name: "openai"
+    logging: true

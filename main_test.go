@@ -14,8 +14,8 @@ import (
 
 // Mock logging server for testing
 type MockLoggingServer struct {
-	server   *httptest.Server
-	requests map[string][]byte
+	server    *httptest.Server
+	requests  map[string][]byte
 	responses map[string][]byte
 }
 
@@ -43,9 +43,10 @@ func NewMockLoggingServer() *MockLoggingServer {
 
 		data, _ := io.ReadAll(r.Body)
 
-		if streamType == "request" {
+		switch streamType {
+		case "request":
 			mock.requests[requestID] = data
-		} else if streamType == "response" {
+		case "response":
 			mock.responses[requestID] = data
 		}
 
@@ -85,12 +86,12 @@ server:
 logging:
   console: false
   server_url: "%s"
-  enabled: true
 
 routes:
-  - source: "/api/v1/"
+  test:
+    source: "/api/v1/"
     destination: "%s/"
-    name: "test"
+    logging: true
 `, loggingServer.URL(), backend.URL)
 
 	err := os.WriteFile("test_config_new.yaml", []byte(configContent), 0666)
@@ -149,7 +150,7 @@ routes:
 
 	// Verify we got exactly one request/response pair
 	if len(loggingServer.requests) != 1 || len(loggingServer.responses) != 1 {
-		t.Errorf("Expected 1 request and 1 response, got %d requests and %d responses", 
+		t.Errorf("Expected 1 request and 1 response, got %d requests and %d responses",
 			len(loggingServer.requests), len(loggingServer.responses))
 	}
 
@@ -213,12 +214,12 @@ server:
 logging:
   console: false
   server_url: "%s"
-  enabled: true
 
 routes:
-  - source: "/api/v1/"
+  streaming_test:
+    source: "/api/v1/"
     destination: "%s/"
-    name: "streaming_test"
+    logging: true
 `, loggingServer.URL(), backend.URL)
 
 	err := os.WriteFile("test_streaming_config.yaml", []byte(configContent), 0666)
@@ -284,10 +285,9 @@ func TestConfigValidationNew(t *testing.T) {
 		Logging: struct {
 			Console   bool   `yaml:"console"`
 			ServerURL string `yaml:"server_url"`
-			Enabled   bool   `yaml:"enabled"`
-		}{Console: true, ServerURL: "http://localhost:8080", Enabled: true},
-		Routes: []Route{
-			{Source: "/api/v1/", Destination: "https://example.com/", Name: "test"},
+		}{Console: true, ServerURL: "http://localhost:8080"},
+		Routes: map[string]Route{
+			"test": {Source: "/api/v1/", Destination: "https://example.com/", Logging: true},
 		},
 	}
 
@@ -302,7 +302,11 @@ func TestConfigValidationNew(t *testing.T) {
 		t.Error("Route not found")
 	}
 
-	if route.Name != "test" {
-		t.Errorf("Expected route name 'test', got '%s'", route.Name)
+	if route.Destination != "https://example.com/" {
+		t.Errorf("Expected destination 'https://example.com/', got '%s'", route.Destination)
+	}
+
+	if !route.Logging {
+		t.Error("Expected logging to be enabled for route")
 	}
 }
