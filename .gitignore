@@ -4,10 +4,10 @@
 *.dll
 *.so
 *.dylib
-openrouter-proxy
-logging-server
+/openrouter-proxy
+/logging-server/logging-server
 
-logs/
+logs*/
 
 # Test binary, built with `go test -c`
 *.test
