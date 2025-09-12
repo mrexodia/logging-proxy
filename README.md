@@ -1,315 +1,174 @@
-# OpenRouter Proxy
+# Logging Proxy
 
-A high-performance, configurable HTTP proxy with **streaming duplex architecture** designed for real-time logging and proxying requests to AI API endpoints like OpenRouter and OpenAI. Built with Go, it features UUID-based request tracking and streams request/response data to a dedicated logging server without blocking the main proxy pipeline.
+A high-performance HTTP proxy server with duplex streaming support and comprehensive logging capabilities. Built in Go, this proxy allows you to route API requests to multiple destinations while capturing full request/response data for analysis and debugging.
 
 ## Features
 
-- 🚀 **Streaming Duplex Architecture**: Real-time request/response streaming with zero performance impact
-- 🆔 **UUID Request Tracking**: Each request gets a unique identifier for complete traceability
-- 🔧 **Configurable Routes**: YAML-based configuration for multiple endpoints  
-- 📊 **Dedicated Logging Server**: Separate server for handling log storage and processing
-- 🌊 **True Streaming Support**: Full support for SSE and chunked responses without buffering
-- ⚡ **Zero-Copy Performance**: Direct streaming with no intermediate buffering
-- 🧪 **Well Tested**: Comprehensive test suite covering all functionality including streaming
+- **Duplex Streaming**: Real-time bidirectional streaming support for API requests
+- **Route-Based Proxying**: Configure multiple routes with different destinations
+- **Comprehensive Logging**: Optional per-route logging with request/response capture
+- **Console Monitoring**: Real-time request tracking in the console
+- **Request Replay**: Captured logs include original proxy paths for easy replay
+- **Unique Request IDs**: Every request gets a UUID for correlation
+- **Flexible Configuration**: YAML-based configuration with per-route settings
 
 ## Architecture
 
-### Streaming Duplex Design
+The package consists of three components components:
 
-The proxy implements a streaming duplex architecture where each request is assigned a UUID and both request and response streams are duplicated in real-time:
-
-```
-┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
-│   Client Request    │───▶│   Proxy Server      │───▶│  Target API Server  │
-│                     │    │                     │    │                     │
-│ POST /api/v1/chat   │    │ 1. Generate UUID    │    │ POST /api/v1/chat   │
-│ {"stream": true}    │    │ 2. Duplex Request   │    │ {"stream": true}    │
-└─────────────────────┘    │ 3. Duplex Response  │    └─────────────────────┘
-           │                └─────────────────────┘                │
-           │                          │                            │
-           │                          ▼                            │
-           │                ┌─────────────────────┐                │
-           │                │  Logging Server     │                │
-           │                │                     │                │
-           │                │ PUT /{uuid}/request │◀───────────────┘
-           │                │ PUT /{uuid}/response│◀───────────────┐
-           │                └─────────────────────┘                │
-           │                                                       │
-           └───────────────── Response Stream ─────────────────────┘
-                            (SSE/Chunked/JSON)
-```
-
-### Key Architecture Decisions
-
-1. **UUID-Based Tracking**: Each request gets a unique identifier for complete traceability
-2. **Stream Duplexing**: Uses `io.TeeReader` and `io.MultiWriter` for real-time stream splitting
-3. **Dedicated Logging Server**: Separate service handles log storage via PUT requests
-4. **Zero Buffering**: Direct streaming with no intermediate storage
-5. **Async Logging**: Goroutines handle logging without blocking the main proxy flow
-
-### Component Details
-
-#### ProxyServer
-- Central coordinator managing routes and logging client
-- Generates UUIDs for request tracking
-- Handles stream duplexing for both requests and responses
-
-#### LoggingClient
-- HTTP client for sending data to the logging server
-- Handles PUT requests to `/{uuid}/request` and `/{uuid}/response`
-- Includes headers and body data in raw HTTP format
-
-#### Stream Duplexing
-- **Request Duplexing**: `io.TeeReader` splits request stream to target and logging server
-- **Response Duplexing**: `io.MultiWriter` duplicates response stream to client and logging server
-- **Real-time Processing**: No buffering, streams data as it flows
+1. **Proxy Package** (`server.go`): Routes requests and handles streaming
+2. **Logging Server** (`logging-server/`): Command line tool for logging data
+2. **Proxy Server** (`logging-proxy/`): Command line tool for the proxy
 
 ## Configuration
 
-The proxy uses a YAML configuration file (`config.yaml`):
+Edit `config.yaml` to configure the proxy:
 
-```yaml
-server:
-  port: 5601              # Port to listen on
-  host: "localhost"       # Host to bind to
-
-logging:
-  console: true           # Enable simple console output
-  server_url: "http://localhost:8080"  # Logging server URL
-  enabled: true           # Enable streaming to logging server
-
-routes:
-  - source: "/api/v1/"                    # Source path prefix
-    destination: "https://openrouter.ai/" # Target server
-    name: "openrouter"                    # Route identifier
-  - source: "/v1/"
-    destination: "https://api.openai.com/"
-    name: "openai"
-```
-
-### Route Configuration
-
-Routes map source paths to destination servers:
-
-- **source**: Path prefix to match (e.g., `/api/v1/`)
-- **destination**: Target server URL (e.g., `https://openrouter.ai/`)
-- **name**: Human-readable identifier for logging
-
-**Path Transformation Example:**
-- Request: `GET /api/v1/chat/completions`
-- Route: `source: "/api/v1/"` → `destination: "https://openrouter.ai/"`
-- Result: `GET https://openrouter.ai/api/v1/chat/completions`
-
-## Usage
-
-### Quick Start
-
-1. **Start the logging server** (handles log storage):
-   ```bash
-   ./logging-server
-   ```
-   This starts the logging server on port 8080 and creates a `logs/` directory.
-
-2. **Configure the proxy** by editing `config.yaml`
-
-3. **Run the proxy**:
-   ```bash
-   ./openrouter-proxy
-   ```
-
-4. **Make requests** to the configured endpoints:
-   ```bash
-   curl -X POST http://localhost:5601/api/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -H "Authorization: Bearer YOUR_API_KEY" \
-     -d '{"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello!"}]}'
-   ```
-
-5. **Check logs** in the `logs/` directory for detailed request/response data
-
-### Example Configurations
-
-#### OpenRouter + OpenAI Proxy
 ```yaml
 server:
   port: 5601
   host: "localhost"
 
 logging:
-  console: true
-  file: "requests.log"
-  binary_files: true
+  console: true           # Enable console output for request monitoring
+  server_url: "http://localhost:8080"  # Logging server URL
+  default: true           # Default logging behavior for routes and unknown requests
 
 routes:
-  - source: "/api/v1/"
+  openrouter:
+    source: "/api/v1/"
     destination: "https://openrouter.ai/"
-    name: "openrouter"
-  - source: "/v1/"
-    destination: "https://api.openai.com/"
-    name: "openai"
+  lmstudio:
+    source: "/lmstudio"
+    destination: "http://127.0.0.1:1234/"
+    logging: false        # Disable logging for this route
 ```
 
-#### Single Endpoint with Custom Logging
-```yaml
-server:
-  port: 8080
-  host: "0.0.0.0"
+### Configuration Options
 
-logging:
-  console: false
-  file: "/var/log/api-proxy.log"
-  binary_files: false
+- **server.port**: Port for the proxy server (default: 5601)
+- **server.host**: Host interface to bind to (default: localhost)
+- **logging.console**: Enable/disable console request monitoring
+- **logging.server_url**: URL of the logging server
+- **logging.default**: Log unknown routes and 404 responses
+- **routes**: Map of route configurations with source/destination mappings
 
-routes:
-  - source: "/api/"
-    destination: "https://api.example.com/"
-    name: "example-api"
-```
+## Running the Application
 
-## Logging
+1. **Start the logging server** (in one terminal):
+   ```bash
+   go run ./logging-server
+   ```
+   The logging server will start on port 8080 and create a `logs/` directory.
 
-The proxy provides dual-level logging:
-
-### 1. Console Output (Proxy)
-Simple request tracking with UUID:
-```
-2025-09-09 17:45:32 [a1b2c3d4] POST /api/v1/chat/completions -> https://openrouter.ai/ [openrouter]
-2025-09-09 17:45:45 [e5f6g7h8] GET /v1/models -> https://api.openai.com/ [openai]  
-```
-
-### 2. Detailed Logging (Logging Server)
-Complete request/response pairs saved as binary files in `logs/` directory:
-- `2025-09-09_17-45-32.123_a1b2c3d4_request.bin`  - Raw HTTP request (headers + body)
-- `2025-09-09_17-45-32.456_a1b2c3d4_response.bin` - Raw HTTP response (headers + body)
-
-**UUID-Based Tracking:**
-- Each request gets a unique UUID (e.g., `a1b2c3d4-1234-5678-9abc-def123456789`)
-- Request and response files share the same UUID for easy pairing
-- Files contain raw HTTP data exactly as sent/received
-
-**Logging Server API:**
-- `PUT /{uuid}/request` - Receives request data
-- `PUT /{uuid}/response` - Receives response data
-- Data includes HTTP headers and body as binary stream
-
-## Streaming Support
-
-The proxy fully supports Server-Sent Events (SSE) and chunked transfer encoding:
-
-### Detection
-Automatically detects streaming responses by:
-- `Content-Type: text/event-stream`
-- `Content-Type: application/stream+json`
-- `Transfer-Encoding: chunked`
-
-### Handling
-- **Non-buffering**: Streams data directly to client
-- **Complete Logging**: Captures entire stream for logging
-- **Performance**: No impact on streaming performance
-
-### Example Streaming Request
-```bash
-curl -N http://localhost:5601/api/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-3.5-turbo", "messages": [...], "stream": true}'
-```
-
-## Building
-
-### Prerequisites
-- Go 1.22+
-- Dependencies managed with Go modules
-
-### Build Commands
-```bash
-# Install dependencies
-go mod tidy
-
-# Build main proxy
-go build .
-
-# Build logging server
-cd cmd && go build .
-
-# Run tests
-go test -v
-
-# Cross-compile for Linux
-GOOS=linux GOARCH=amd64 go build .
-cd cmd && GOOS=linux GOARCH=amd64 go build .
-```
+2. **Start the proxy server** (in another terminal):
+   ```bash
+   go run ./logging-proxy
+   ```
+   The proxy will start on the configured port (default: 5601).
 
 ## Testing
 
-The project includes comprehensive tests covering:
+### Running Unit Tests
 
-- ✅ Configuration loading and validation
-- ✅ UUID-based request tracking
-- ✅ Streaming duplex architecture  
-- ✅ SSE/streaming responses with real-time logging
-- ✅ Multiple route handling
-- ✅ Path transformation logic
-- ✅ Logging server integration
-
-Run tests:
 ```bash
-go test -v
+go test -v .
 ```
 
-## Performance Considerations
+### Manual Testing with test.http
 
-### Design Choices for Performance
-1. **Non-blocking Logging**: Uses goroutines to prevent I/O from blocking requests
-2. **Streaming-Aware**: Doesn't buffer large streaming responses
-3. **Minimal Copying**: Reuses request/response bodies efficiently
-4. **Connection Reuse**: Leverages Go's HTTP transport connection pooling
+The project includes `test.http` with example requests for manual testing using [VS Code REST Client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client).
 
-### Benchmarking
-The proxy adds minimal latency:
-- **Regular requests**: <1ms overhead
-- **Streaming requests**: <1ms initial overhead, no ongoing impact
-- **Memory usage**: Constant regardless of response size
+**Example test scenarios:**
 
-## Security Notes
+1. **Direct LM Studio Request** (for comparison):
+   ```http
+   POST http://127.0.0.1:1234/v1/chat/completions
+   Content-Type: application/json
+   Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   
+   {
+     "model": "liquid/lfm2-1.2b",
+     "messages": [{"role": "user", "content": "Test message"}]
+   }
+   ```
 
-- **Request Headers**: All client headers (including Authorization) are forwarded
-- **Response Headers**: All server headers are returned to client
-- **Logging**: Be aware that request/response bodies are logged in binary files
-- **Network**: Consider firewall rules for the proxy port
+2. **Proxied Request**:
+   ```http
+   POST http://127.0.0.1:5601/lmstudio/v1/chat/completions
+   Content-Type: application/json
+   Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   
+   {
+     "model": "liquid/lfm2-1.2b",
+     "messages": [{"role": "user", "content": "Test message"}]
+   }
+   ```
 
-## Troubleshooting
+3. **Streaming Request**:
+   ```http
+   POST http://127.0.0.1:5601/lmstudio/v1/chat/completions
+   Content-Type: application/json
+   
+   {
+     "model": "liquid/lfm2-1.2b",
+     "messages": [{"role": "user", "content": "Test message"}],
+     "stream": true
+   }
+   ```
 
-### Common Issues
+### Testing with LM Studio
 
-1. **404 Errors**
-   - Check route configuration matches request paths
-   - Verify destination URLs are accessible
-   - Ensure path prefixes include trailing slashes
+1. **Setup LM Studio**:
+   - Install and start LM Studio
+   - Load a model (e.g., "liquid/lfm2-1.2b")
+   - Enable the local server on `http://127.0.0.1:1234`
 
-2. **Connection Refused**
-   - Verify target servers are reachable
-   - Check firewall settings
-   - Confirm destination URLs in config
+2. **Test the proxy**:
+   - Start both logging server and proxy
+   - Use the provided `test.http` requests
+   - Compare direct vs. proxied responses
+   - Check the `logs/` directory for captured traffic
 
-3. **Streaming Issues**
-   - Ensure client supports chunked encoding
-   - Check for proxy/firewall interference
-   - Verify Content-Type headers
+## How It Works
 
-### Debug Mode
-Enable verbose logging by setting `console: true` in configuration.
+### Request Flow
 
-## License
+1. **Client** sends request to proxy (e.g., `localhost:5601/lmstudio/v1/chat/completions`)
+2. **Proxy** matches the route (`/lmstudio` → `http://127.0.0.1:1234/`)
+3. **Path transformation** converts `/lmstudio/v1/chat/completions` → `/v1/chat/completions`
+4. **Duplex streaming** forwards request to destination while logging (if enabled)
+5. **Response streaming** returns data to client while logging response
+6. **Logging server** stores complete HTTP request/response data with metadata
 
-This project is open source. See LICENSE file for details.
+### Route Matching
 
-## Missing
+Routes use prefix matching with longest match wins:
+- Request: `/lmstudio/v1/chat/completions`
+- Route: `/lmstudio` → `http://127.0.0.1:1234/`
+- Result: `http://127.0.0.1:1234/v1/chat/completions`
 
-- Metadata endpoint
-- Logging UI
-  - Simple frontend showing a list of requests
-  - Websocket for live feed
-  - Support live tailing requests/responses (websocket/SSE)
-  - Refactor REST API for logging
-- Look at using a custom `Transport` to simplify full request/response logging
-- Test if websockets work properly
+### Logging Format
+
+Captured logs include:
+- **Binary files**: Complete HTTP request/response data
+- **Metadata JSON**: Request ID, timestamps, headers, processing time
+- **X-Proxy-Path header**: Original proxy URL for replay capability
+
+Log files are named: `{timestamp}_{requestID}_{request|response}.bin`
+
+## Console Output
+
+When `logging.console` is enabled, you'll see real-time request monitoring:
+
+```
+2024-01-15 10:30:45 [a1b2c3d4] POST /lmstudio/v1/chat/completions -> http://127.0.0.1:1234/ [log]
+2024-01-15 10:30:46 [a1b2c3d4] Response completed (1.2s)
+```
+
+## Future Enhancements
+
+- Metadata endpoint for querying logged requests
+- Web-based logging UI with live request feed
+- WebSocket support for real-time monitoring
+- Custom Transport implementation for simplified logging

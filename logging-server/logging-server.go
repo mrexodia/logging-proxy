@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -22,7 +23,23 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
+type RequestMetadata struct {
+	RequestID     string            `json:"request_id"`
+	StreamType    string            `json:"stream_type"`
+	Timestamp     time.Time         `json:"timestamp"`
+	ContentLength int64             `json:"content_length"`
+	UserAgent     string            `json:"user_agent"`
+	RemoteAddr    string            `json:"remote_addr"`
+	Headers       map[string]string `json:"headers"`
+	Method        string            `json:"method"`
+	URL           string            `json:"url"`
+	ProcessingMS  int64             `json:"processing_time_ms"`
+	Filename      string            `json:"filename"`
+}
+
 func handleLogRequest(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	
 	if r.Method != "PUT" {
 		http.Error(w, "Only PUT method allowed", http.StatusMethodNotAllowed)
 		return
@@ -64,9 +81,51 @@ func handleLogRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	processingTime := time.Since(startTime).Milliseconds()
+
+	// Create metadata
+	metadata := RequestMetadata{
+		RequestID:     requestID,
+		StreamType:    streamType,
+		Timestamp:     startTime,
+		ContentLength: bytesWritten,
+		UserAgent:     r.UserAgent(),
+		RemoteAddr:    r.RemoteAddr,
+		Headers:       make(map[string]string),
+		Method:        r.Method,
+		URL:           r.URL.String(),
+		ProcessingMS:  processingTime,
+		Filename:      filepath.Base(filename),
+	}
+
+	// Copy headers
+	for key, values := range r.Header {
+		if len(values) > 0 {
+			metadata.Headers[key] = values[0]
+		}
+	}
+
+	// Save metadata file
+	metadataFilename := fmt.Sprintf("logs/%s_%s_%s_metadata.json", timestamp, requestID[:8], streamType)
+	if err := saveMetadata(metadata, metadataFilename); err != nil {
+		log.Printf("Warning: Failed to save metadata %s: %v", metadataFilename, err)
+	}
+
 	log.Printf("Saved %s for request %s (%d bytes) -> %s", 
 		streamType, requestID[:8], bytesWritten, filepath.Base(filename))
 
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprintf(w, "Logged %d bytes to %s\n", bytesWritten, filename)
+}
+
+func saveMetadata(metadata RequestMetadata, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(metadata)
 }

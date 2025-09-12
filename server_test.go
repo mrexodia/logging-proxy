@@ -1,4 +1,4 @@
-package main
+package loggingproxy
 
 import (
 	"bytes"
@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +64,22 @@ func (m *MockLoggingServer) URL() string {
 	return m.server.URL
 }
 
+// Helper function to create test configs without YAML files
+func createTestConfig(loggingServerURL string, consoleLogging, defaultLogging bool, routes map[string]Route) *Config {
+	return &Config{
+		Server: struct {
+			Port int    `yaml:"port"`
+			Host string `yaml:"host"`
+		}{Port: 0, Host: "localhost"},
+		Logging: struct {
+			Console   bool   `yaml:"console"`
+			ServerURL string `yaml:"server_url"`
+			Default   bool   `yaml:"default"`
+		}{Console: consoleLogging, ServerURL: loggingServerURL, Default: defaultLogging},
+		Routes: routes,
+	}
+}
+
 func TestNewArchitecture(t *testing.T) {
 	// Create mock backend server
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,41 +92,16 @@ func TestNewArchitecture(t *testing.T) {
 	loggingServer := NewMockLoggingServer()
 	defer loggingServer.Close()
 
-	// Create test config
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: true
-
-routes:
-  test:
-    source: "/api/v1/"
-    destination: "%s/"
-    logging: true
-`, loggingServer.URL(), backend.URL)
-
-	err := os.WriteFile("test_config_new.yaml", []byte(configContent), 0666)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_config_new.yaml")
-
-	// Load config
-	config, err := loadConfig("test_config_new.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	// Create test config directly
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"test": {Source: "/api/v1/", Destination: backend.URL + "/", Logging: true},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Make a test request
@@ -206,41 +196,16 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 	loggingServer := NewMockLoggingServer()
 	defer loggingServer.Close()
 
-	// Create test config
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: true
-
-routes:
-  streaming_test:
-    source: "/api/v1/"
-    destination: "%s/"
-    logging: true
-`, loggingServer.URL(), backend.URL)
-
-	err := os.WriteFile("test_streaming_config.yaml", []byte(configContent), 0666)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_streaming_config.yaml")
-
-	// Load config
-	config, err := loadConfig("test_streaming_config.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	// Create test config directly
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"streaming_test": {Source: "/api/v1/", Destination: backend.URL + "/", Logging: true},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Make streaming request
@@ -296,11 +261,11 @@ func TestConfigValidationNew(t *testing.T) {
 
 	server := NewProxyServer(config)
 
-	if len(server.routes) != 1 {
-		t.Errorf("Expected 1 route, got %d", len(server.routes))
+	if len(server.Routes) != 1 {
+		t.Errorf("Expected 1 route, got %d", len(server.Routes))
 	}
 
-	route := server.routes["/api/v1/"]
+	route := server.Routes["/api/v1/"]
 	if route == nil {
 		t.Error("Route not found")
 	}
@@ -320,40 +285,15 @@ func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
 	defer loggingServer.Close()
 
 	// Create test config with default logging enabled
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: true
-
-routes:
-  known:
-    source: "/api/"
-    destination: "https://example.com/"
-    logging: true
-`, loggingServer.URL())
-
-	err := os.WriteFile("test_unknown_route_enabled.yaml", []byte(configContent), 0644)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_unknown_route_enabled.yaml")
-
-	// Load config
-	config, err := loadConfig("test_unknown_route_enabled.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"known": {Source: "/api/", Destination: "https://example.com/", Logging: true},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Make request to unknown route
@@ -387,40 +327,15 @@ func TestUnknownRouteWithDefaultLoggingDisabled(t *testing.T) {
 	defer loggingServer.Close()
 
 	// Create test config with default logging disabled
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: false
-
-routes:
-  known:
-    source: "/api/"
-    destination: "https://example.com/"
-    logging: true
-`, loggingServer.URL())
-
-	err := os.WriteFile("test_unknown_route_disabled.yaml", []byte(configContent), 0644)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_unknown_route_disabled.yaml")
-
-	// Load config
-	config, err := loadConfig("test_unknown_route_disabled.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	config := createTestConfig(loggingServer.URL(), false, false, map[string]Route{
+		"known": {Source: "/api/", Destination: "https://example.com/", Logging: true},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Make request to unknown route
@@ -461,44 +376,16 @@ func TestRouteSpecificLoggingOverride(t *testing.T) {
 	defer loggingServer.Close()
 
 	// Create test config with mixed logging settings
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: true
-
-routes:
-  logged_route:
-    source: "/api/"
-    destination: "%s/"
-    logging: true
-  unlogged_route:
-    source: "/nolog/"
-    destination: "%s/"
-    logging: false
-`, loggingServer.URL(), backend.URL, backend.URL)
-
-	err := os.WriteFile("test_logging_override.yaml", []byte(configContent), 0644)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_logging_override.yaml")
-
-	// Load config
-	config, err := loadConfig("test_logging_override.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"logged_route":   {Source: "/api/", Destination: backend.URL + "/", Logging: true},
+		"unlogged_route": {Source: "/nolog/", Destination: backend.URL + "/", Logging: false},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Clear logging server state
@@ -560,40 +447,15 @@ func TestRequestWithoutBody(t *testing.T) {
 	defer loggingServer.Close()
 
 	// Create test config
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: true
-
-routes:
-  test:
-    source: "/api/"
-    destination: "%s/"
-    logging: true
-`, loggingServer.URL(), backend.URL)
-
-	err := os.WriteFile("test_no_body.yaml", []byte(configContent), 0644)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_no_body.yaml")
-
-	// Load config
-	config, err := loadConfig("test_no_body.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"test": {Source: "/api/", Destination: backend.URL + "/", Logging: true},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Make GET request (no body)
@@ -648,40 +510,15 @@ func TestHostHeaderLogging(t *testing.T) {
 	defer loggingServer.Close()
 
 	// Create test config
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: true
-
-routes:
-  test:
-    source: "/api/"
-    destination: "%s/"
-    logging: true
-`, loggingServer.URL(), backend.URL)
-
-	err := os.WriteFile("test_host_header.yaml", []byte(configContent), 0644)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_host_header.yaml")
-
-	// Load config
-	config, err := loadConfig("test_host_header.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"test": {Source: "/api/", Destination: backend.URL + "/", Logging: true},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Make request with explicit Host header
@@ -713,23 +550,23 @@ routes:
 	for _, requestData := range loggingServer.requests {
 		requestString := string(requestData)
 		t.Logf("Logged request:\n%s", requestString)
-		
+
 		// Should contain the updated Host header pointing to the destination
 		if !strings.Contains(requestString, "Host:") {
 			t.Error("Expected logged request to contain Host header")
 		}
-		
+
 		// Should contain the destination host, not the original custom host
 		backendHost := strings.TrimPrefix(backend.URL, "http://")
 		if !strings.Contains(requestString, backendHost) {
 			t.Errorf("Expected Host header to contain backend host %s", backendHost)
 		}
-		
+
 		// Should NOT contain the custom host from the original request
 		if strings.Contains(requestString, "custom-host.example.com") {
 			t.Error("Expected Host header to be updated to destination, not contain original custom host")
 		}
-		
+
 		break // Check first request
 	}
 }
@@ -746,40 +583,15 @@ func TestSpecialHeadersLogging(t *testing.T) {
 	defer loggingServer.Close()
 
 	// Create test config
-	configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: false
-  server_url: "%s"
-  default: true
-
-routes:
-  test:
-    source: "/api/"
-    destination: "%s/"
-    logging: true
-`, loggingServer.URL(), backend.URL)
-
-	err := os.WriteFile("test_special_headers.yaml", []byte(configContent), 0644)
-	if err != nil {
-		t.Fatal("Failed to write test config:", err)
-	}
-	defer os.Remove("test_special_headers.yaml")
-
-	// Load config
-	config, err := loadConfig("test_special_headers.yaml")
-	if err != nil {
-		t.Fatal("Failed to load config:", err)
-	}
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"test": {Source: "/api/", Destination: backend.URL + "/", Logging: true},
+	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.handleRequest))
+	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
 	defer testServer.Close()
 
 	// Make POST request with body to test Content-Length
@@ -805,35 +617,35 @@ routes:
 	for _, requestData := range loggingServer.requests {
 		requestString := string(requestData)
 		t.Logf("Logged request:\n%s", requestString)
-		
+
 		// Should contain Host header
 		if !strings.Contains(requestString, "Host:") {
 			t.Error("Expected logged request to contain Host header")
 		}
-		
+
 		// Should contain Content-Length header (either explicit or in original headers)
 		hasExplicitContentLength := strings.Contains(requestString, "Content-Length:")
 		hasContentType := strings.Contains(requestString, "Content-Type:")
 		hasBody := strings.Contains(requestString, requestBody)
-		
+
 		if !hasContentType {
 			t.Error("Expected logged request to contain Content-Type header")
 		}
-		
+
 		if !hasBody {
 			t.Error("Expected logged request to contain request body")
 		}
-		
+
 		// For POST with body, we should have either explicit Content-Length or the body should be present
 		if !hasExplicitContentLength && !hasBody {
 			t.Error("Expected either Content-Length header or request body to be logged")
 		}
-		
+
 		// Should contain X-Proxy-Path header
 		if !strings.Contains(requestString, "X-Proxy-Path:") {
 			t.Error("Expected logged request to contain X-Proxy-Path header")
 		}
-		
+
 		break // Check first request
 	}
 }
@@ -864,35 +676,10 @@ func TestConsoleLoggingBehavior(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			configContent := fmt.Sprintf(`
-server:
-  port: 0
-  host: "localhost"
-
-logging:
-  console: %t
-  server_url: "%s"
-  default: %t
-
-routes:
-  test:
-    source: "/api/"
-    destination: "%s/"
-    logging: %t
-`, tc.consoleEnabled, loggingServer.URL(), tc.defaultLogging, backend.URL, tc.routeLogging)
-
-			configFile := fmt.Sprintf("test_console_%s.yaml", strings.ReplaceAll(tc.name, " ", "_"))
-			err := os.WriteFile(configFile, []byte(configContent), 0644)
-			if err != nil {
-				t.Fatal("Failed to write test config:", err)
-			}
-			defer os.Remove(configFile)
-
-			// Load config
-			config, err := loadConfig(configFile)
-			if err != nil {
-				t.Fatal("Failed to load config:", err)
-			}
+			// Create test config
+			config := createTestConfig(loggingServer.URL(), tc.consoleEnabled, tc.defaultLogging, map[string]Route{
+				"test": {Source: "/api/", Destination: backend.URL + "/", Logging: tc.routeLogging},
+			})
 
 			// Verify config was parsed correctly
 			if config.Logging.Console != tc.consoleEnabled {

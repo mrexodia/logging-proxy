@@ -1,4 +1,4 @@
-module github.com/mrexodia/openrouter-proxy
+module github.com/mrexodia/logging-proxy
 
 go 1.22.0
 

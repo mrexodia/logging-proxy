@@ -4,7 +4,9 @@
 *.dll
 *.so
 *.dylib
-/openrouter-proxy
+
+# Command binaries
+/logging-proxy/logging-proxy
 /logging-server/logging-server
 
 logs*/
