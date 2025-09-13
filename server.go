@@ -8,23 +8,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
-
-type Config struct {
-	Server struct {
-		Port int    `yaml:"port"`
-		Host string `yaml:"host"`
-	} `yaml:"server"`
-	Logging struct {
-		Console bool   `yaml:"console"`
-		File    bool   `yaml:"file"`
-		LogDir  string `yaml:"log_dir"`
-	} `yaml:"logging"`
-	Routes map[string]Route `yaml:"routes"`
-}
 
 // Route defines a proxy route configuration.
 // Pattern uses Go's http.ServeMux pattern syntax (Go 1.22+):
@@ -38,89 +24,58 @@ type Route struct {
 }
 
 type ProxyServer struct {
-	Config *Config
 	logger Logger
 	mux    *http.ServeMux
 }
 
-func NewProxyServer(config *Config) *ProxyServer {
-	var logger Logger = &NoOpLogger{}
-	
-	if config.Logging.File {
-		logDir := config.Logging.LogDir
-		if logDir == "" {
-			logDir = "logs"
-		}
-		if fileLogger, err := NewFileLogger(logDir); err != nil {
-			log.Printf("Failed to create file logger: %v, using no-op logger", err)
-		} else {
-			logger = fileLogger
-		}
-	}
-	
-	server := &ProxyServer{
-		Config: config,
-		logger: logger,
+func NewProxyServer() *ProxyServer {
+	return &ProxyServer{
+		logger: &NoOpLogger{},
 		mux:    http.NewServeMux(),
 	}
-	server.setupPatterns()
-	return server
 }
 
-// setupPatterns configures HTTP patterns like experiment.go
-func (s *ProxyServer) setupPatterns() {
+func (s *ProxyServer) SetLogger(logger Logger) {
+	s.logger = logger
+}
+
+func (s *ProxyServer) AddRoute(pattern, destination string) {
+	route := Route{
+		Pattern:     pattern,
+		Destination: destination,
+	}
+	s.addRouteHandler(route)
+}
+
+func (s *ProxyServer) addRouteHandler(route Route) {
 	wildcardRegex := regexp.MustCompile(`{[a-zA-Z0-9_.]+`)
-	registerCatchAll := true
+	pattern := route.Pattern
 
-	for _, route := range s.Config.Routes {
-		pattern := route.Pattern
-		fmt.Printf("[route] %s -> %s\n", pattern, route.Destination)
+	fmt.Printf("[route] %s -> %s\n", pattern, route.Destination)
 
-		if wildcardRegex.MatchString(pattern) {
-			panic(fmt.Sprintf("Pattern %s contains a wildcard, which is not supported\n", pattern))
-		}
-
-		// If the user specifies a catch-all route, we don't need to register our own handler
-		if pattern == "/" {
-			registerCatchAll = false
-		}
-
-		// Append a named wildcard so we can extract the path from the request
-		if strings.HasSuffix(pattern, "/") {
-			pattern += "{path...}"
-		}
-
-		s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			s.handlePatternRequest(w, r, route)
-		})
+	if wildcardRegex.MatchString(pattern) {
+		panic(fmt.Sprintf("Pattern %s contains a wildcard, which is not supported\n", pattern))
 	}
 
-	if registerCatchAll {
-		fmt.Printf("Registering catch-all handler\n")
-		s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			s.handleUnknownRoute(w, r)
-		})
-	} else {
-		fmt.Printf("Skipping catch-all handler\n")
+	// Append a named wildcard so we can extract the path from the request
+	if strings.HasSuffix(pattern, "/") {
+		pattern += "{path...}"
 	}
+
+	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		s.handlePatternRequest(w, r, route)
+	})
 }
 
-func (s *ProxyServer) Start() {
-	// Display configured routes
-	for _, route := range s.Config.Routes {
-		fmt.Printf("Route: %s -> %s\n", route.Pattern, route.Destination)
-	}
+func (s *ProxyServer) SetCatchAllHandler() {
+	fmt.Printf("Registering catch-all handler\n")
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		s.handleUnknownRoute(w, r)
+	})
+}
 
-	addr := fmt.Sprintf("%s:%d", s.Config.Server.Host, s.Config.Server.Port)
+func (s *ProxyServer) Start(addr string) {
 	fmt.Printf("Proxy server starting on %s\n", addr)
-	
-	if s.Config.Logging.File {
-		logDir := s.Config.Logging.LogDir
-		if logDir == "" {
-			logDir = "logs"
-		}
-		fmt.Printf("Logging: file logging to %s\n", logDir)
-	}
 
 	server := &http.Server{
 		Addr:                         addr,
@@ -133,7 +88,6 @@ func (s *ProxyServer) Start() {
 
 // handlePatternRequest processes requests that match a configured pattern
 func (s *ProxyServer) handlePatternRequest(w http.ResponseWriter, r *http.Request, route Route) {
-	start := time.Now()
 	requestID := uuid.New().String()
 
 	// Extract path from the pattern match
@@ -153,16 +107,6 @@ func (s *ProxyServer) handlePatternRequest(w http.ResponseWriter, r *http.Reques
 		destinationUrl += "?" + r.URL.RawQuery
 	}
 
-	// Console logging
-	if s.Config.Logging.Console {
-		fmt.Printf("%s [%s] %s %s -> %s\n",
-			start.Format("2006-01-02 15:04:05"),
-			requestID[:8],
-			r.Method,
-			r.URL.Path,
-			destinationUrl)
-	}
-
 	// Parse target URL
 	targetURL, err := url.Parse(destinationUrl)
 	if err != nil {
@@ -180,30 +124,14 @@ func (s *ProxyServer) handlePatternRequest(w http.ResponseWriter, r *http.Reques
 
 // handleUnknownRoute handles requests that don't match any configured pattern
 func (s *ProxyServer) handleUnknownRoute(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	requestID := uuid.New().String()
-
-	// Console logging for unknown routes
-	if s.Config.Logging.Console {
-		fmt.Printf("%s [%s] %s %s -> NOT_FOUND\n",
-			start.Format("2006-01-02 15:04:05"),
-			requestID[:8],
-			r.Method,
-			r.URL.Path)
-	}
-
 	// Return 404 for unknown routes
 	http.Error(w, "custom 404 page", http.StatusNotFound)
 }
 
-
 // createRequestMetadata creates metadata for a request to avoid duplication
 func (s *ProxyServer) createRequestMetadata(r *http.Request, requestID string, route *Route) RequestMetadata {
-	proxyPath := fmt.Sprintf("http://%s:%d%s", s.Config.Server.Host, s.Config.Server.Port, r.URL.Path)
-	if r.URL.RawQuery != "" {
-		proxyPath += "?" + r.URL.RawQuery
-	}
-	
+	proxyPath := r.URL.String()
+
 	return RequestMetadata{
 		ID:         requestID,
 		Method:     r.Method,
@@ -223,13 +151,13 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 	requestLogReader, requestLogWriter := io.Pipe()
 	teeReader := io.TeeReader(originalReq.Body, requestLogWriter)
 	proxyRequestBody := &streamDuplexer{
-		Reader:     teeReader,
-		original:   originalReq.Body,
-		logWriter:  requestLogWriter,
+		Reader:    teeReader,
+		original:  originalReq.Body,
+		logWriter: requestLogWriter,
 	}
 	go s.logger.LogRequest(metadata, requestLogReader, originalReq)
 
-	// Create and execute the proxy request synchronously  
+	// Create and execute the proxy request synchronously
 	proxyReq, err := http.NewRequest(originalReq.Method, targetURL.String(), proxyRequestBody)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy request: %w", err)
@@ -269,8 +197,6 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 	return err
 }
 
-
-
 // streamDuplexer wraps a TeeReader and handles proper cleanup for duplexed streams
 type streamDuplexer struct {
 	io.Reader
@@ -284,5 +210,3 @@ func (s *streamDuplexer) Close() error {
 	// Close the original body
 	return s.original.Close()
 }
-
-

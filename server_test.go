@@ -11,20 +11,20 @@ import (
 	"time"
 )
 
-// Helper function to create test configs without YAML files
-func createTestConfig(consoleLogging, fileLogging bool, logDir string, routes map[string]Route) *Config {
-	return &Config{
-		Server: struct {
-			Port int    `yaml:"port"`
-			Host string `yaml:"host"`
-		}{Port: 5601, Host: "localhost"},
-		Logging: struct {
-			Console bool   `yaml:"console"`
-			File    bool   `yaml:"file"`
-			LogDir  string `yaml:"log_dir"`
-		}{Console: consoleLogging, File: fileLogging, LogDir: logDir},
-		Routes: routes,
+// Helper function to create test servers with routes
+func createTestServer(routes map[string]Route) *ProxyServer {
+	server := NewProxyServer()
+	hasCatchAll := false
+	for _, route := range routes {
+		server.AddRoute(route.Pattern, route.Destination)
+		if route.Pattern == "/" {
+			hasCatchAll = true
+		}
 	}
+	if !hasCatchAll {
+		server.SetCatchAllHandler()
+	}
+	return server
 }
 
 func TestNewArchitecture(t *testing.T) {
@@ -35,13 +35,10 @@ func TestNewArchitecture(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config directly
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server with test routes
+	proxyServer := createTestServer(map[string]Route{
 		"test": {Pattern: "/api/v1/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -101,13 +98,10 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config directly
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server with streaming test routes
+	proxyServer := createTestServer(map[string]Route{
 		"streaming_test": {Pattern: "/api/v1/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -143,41 +137,25 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 }
 
 func TestConfigValidationNew(t *testing.T) {
-	config := &Config{
-		Logging: struct {
-			Console bool   `yaml:"console"`
-			File    bool   `yaml:"file"`
-			LogDir  string `yaml:"log_dir"`
-		}{Console: true, File: true, LogDir: "logs"},
-		Routes: map[string]Route{
-			"test": {Pattern: "/api/v1/", Destination: "https://example.com/"},
-		},
+	// Test that server can be created and routes added correctly
+	server := NewProxyServer()
+	server.AddRoute("/api/v1/", "https://example.com/")
+
+	// Since we don't expose internal route storage, we'll just verify the server was created
+	if server == nil {
+		t.Error("Failed to create proxy server")
 	}
 
-	server := NewProxyServer(config)
-
-	if len(server.Config.Routes) != 1 {
-		t.Errorf("Expected 1 route, got %d", len(server.Config.Routes))
-	}
-
-	route, exists := server.Config.Routes["test"]
-	if !exists {
-		t.Error("Route not found")
-	}
-
-	if route.Destination != "https://example.com/" {
-		t.Errorf("Expected destination 'https://example.com/', got '%s'", route.Destination)
-	}
+	// Test that multiple routes can be added
+	server.AddRoute("/api/v2/", "https://api.example.com/")
+	server.SetCatchAllHandler()
 }
 
 func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
-	// Create test config with console logging enabled
-	config := createTestConfig(true, false, "", map[string]Route{
+	// Create proxy server with known route
+	proxyServer := createTestServer(map[string]Route{
 		"known": {Pattern: "/api/", Destination: "https://example.com/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -199,13 +177,10 @@ func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
 }
 
 func TestUnknownRouteWithDefaultLoggingDisabled(t *testing.T) {
-	// Create test config with console logging disabled
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server with known route
+	proxyServer := createTestServer(map[string]Route{
 		"known": {Pattern: "/api/", Destination: "https://example.com/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -234,14 +209,11 @@ func TestMultipleRouteProxying(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config with multiple routes pointing to the same backend
-	config := createTestConfig(true, false, "", map[string]Route{
+	// Create proxy server with multiple routes pointing to the same backend
+	proxyServer := createTestServer(map[string]Route{
 		"api_route":   {Pattern: "/api/", Destination: backend.URL + "/"},
 		"other_route": {Pattern: "/other/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -300,13 +272,10 @@ func TestRequestWithoutBody(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server
+	proxyServer := createTestServer(map[string]Route{
 		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -348,13 +317,10 @@ func TestHostHeaderProxying(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server
+	proxyServer := createTestServer(map[string]Route{
 		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -403,13 +369,10 @@ func TestContentLengthProxying(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server
+	proxyServer := createTestServer(map[string]Route{
 		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -451,51 +414,16 @@ func TestContentLengthProxying(t *testing.T) {
 }
 
 func TestConfigLoggingSettings(t *testing.T) {
-	// Create mock backend server
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "OK")
-	}))
-	defer backend.Close()
-
-	// Test different logging configuration scenarios
-	testCases := []struct {
-		name           string
-		consoleEnabled bool
-		fileEnabled    bool
-		logDir         string
-	}{
-		{"Console enabled, file disabled", true, false, ""},
-		{"Console disabled, file enabled", false, true, "logs"},
-		{"Both console and file enabled", true, true, "logs"},
+	// Test that the proxy server can be created and configured
+	server := NewProxyServer()
+	if server == nil {
+		t.Error("Failed to create proxy server")
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Create test config
-			config := createTestConfig(tc.consoleEnabled, tc.fileEnabled, tc.logDir, map[string]Route{
-				"test": {Pattern: "/api/", Destination: backend.URL + "/"},
-			})
-
-			// Verify config was parsed correctly
-			if config.Logging.Console != tc.consoleEnabled {
-				t.Errorf("Expected console logging %t, got %t", tc.consoleEnabled, config.Logging.Console)
-			}
-
-			if config.Logging.File != tc.fileEnabled {
-				t.Errorf("Expected file logging %t, got %t", tc.fileEnabled, config.Logging.File)
-			}
-
-			if config.Logging.LogDir != tc.logDir {
-				t.Errorf("Expected log directory %s, got %s", tc.logDir, config.Logging.LogDir)
-			}
-
-			// Test that the proxy server can be created with these settings
-			proxyServer := NewProxyServer(config)
-			if proxyServer == nil {
-				t.Error("Failed to create proxy server with logging config")
-			}
-		})
-	}
+	// Test setting different loggers
+	server.SetLogger(&NoOpLogger{})
+	server.AddRoute("/api/", "https://example.com/")
+	server.SetCatchAllHandler()
 }
 
 func TestQueryStringProxying(t *testing.T) {
@@ -507,13 +435,10 @@ func TestQueryStringProxying(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server
+	proxyServer := createTestServer(map[string]Route{
 		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -565,13 +490,10 @@ func TestChunkedTransferEncoding(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create test config
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server
+	proxyServer := createTestServer(map[string]Route{
 		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -622,13 +544,10 @@ func TestChunkedTransferEncoding(t *testing.T) {
 }
 
 func TestUnknownRouteWithQueryString(t *testing.T) {
-	// Create test config with console logging enabled
-	config := createTestConfig(true, false, "", map[string]Route{
+	// Create proxy server with known route
+	proxyServer := createTestServer(map[string]Route{
 		"known": {Pattern: "/api/", Destination: "https://example.com/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -666,14 +585,11 @@ func TestCatchAllHandling(t *testing.T) {
 	}))
 	defer catchAllBackend.Close()
 
-	// Create test config with a catch-all route (pattern "/" matches everything)
-	config := createTestConfig(false, false, "", map[string]Route{
+	// Create proxy server with a catch-all route (pattern "/" matches everything)
+	proxyServer := createTestServer(map[string]Route{
 		"specific":  {Pattern: "/api/", Destination: "https://example.com/"},
 		"catch_all": {Pattern: "/", Destination: catchAllBackend.URL + "/"},
 	})
-
-	// Create proxy server
-	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
@@ -752,21 +668,12 @@ func TestExperimentHttpExamples(t *testing.T) {
 	}))
 	defer mockFileServer.Close()
 
-	// Create test config matching experiment.go routes
-	config := &Config{
-		Logging: struct {
-			Console bool   `yaml:"console"`
-			File    bool   `yaml:"file"`
-			LogDir  string `yaml:"log_dir"`
-		}{Console: false, File: false, LogDir: ""},
-		Routes: map[string]Route{
-			"lmstudio":   {Pattern: "/lmstudio/", Destination: lmStudioServer.URL + "/"},
-			"openrouter": {Pattern: "/openrouter/", Destination: openRouterServer.URL + "/api/v1/"},
-			"mockfile":   {Pattern: "/lmstudio/mockfile", Destination: mockFileServer.URL + "/static/mockfile.txt"},
-		},
-	}
-
-	proxyServer := NewProxyServer(config)
+	// Create proxy server matching experiment.go routes
+	proxyServer := createTestServer(map[string]Route{
+		"lmstudio":   {Pattern: "/lmstudio/", Destination: lmStudioServer.URL + "/"},
+		"openrouter": {Pattern: "/openrouter/", Destination: openRouterServer.URL + "/api/v1/"},
+		"mockfile":   {Pattern: "/lmstudio/mockfile", Destination: mockFileServer.URL + "/static/mockfile.txt"},
+	})
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer.mux)
