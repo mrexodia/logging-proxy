@@ -20,6 +20,7 @@ Edit `config.yaml` to configure the proxy:
 server:
   port: 5601
   host: "localhost"
+  not_found: "/404/"
 
 logging:
   console: true           # Enable console output for request monitoring

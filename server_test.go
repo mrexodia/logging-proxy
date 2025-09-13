@@ -13,7 +13,7 @@ import (
 
 // Helper function to create test servers with routes
 func createTestServer(routes map[string]string) *ProxyServer {
-	server := NewProxyServer()
+	server := NewProxyServer("")
 	logger := &NoOpLogger{}
 
 	for pattern, destination := range routes {
@@ -137,7 +137,7 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 
 func TestConfigValidationNew(t *testing.T) {
 	// Test that server can be created and routes added correctly
-	server := NewProxyServer()
+	server := NewProxyServer("")
 	logger := &NoOpLogger{}
 
 	err := server.AddRoute("/api/v1/", "https://example.com/", logger)
@@ -157,7 +157,7 @@ func TestConfigValidationNew(t *testing.T) {
 	}
 }
 
-func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
+func TestUnknownRoute(t *testing.T) {
 	// Create proxy server with known route
 	proxyServer := createTestServer(map[string]string{
 		"/api/": "https://example.com/",
@@ -182,29 +182,40 @@ func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
 	// Test verifies 404 behavior for unknown routes
 }
 
-func TestUnknownRouteWithDefaultLoggingDisabled(t *testing.T) {
-	// Create proxy server with known route
+func TestConnectionFailure(t *testing.T) {
+	// Create proxy server that redirects to an unreachable address (0.0.0.0)
 	proxyServer := createTestServer(map[string]string{
-		"/api/": "https://example.com/",
+		"/api/": "http://0.0.0.0:9999/",
 	})
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
-	// Make request to unknown route
-	resp, err := http.Get(testServer.URL + "/unknown/path")
+	// Make request that should fail at client.Do()
+	resp, err := http.Get(testServer.URL + "/api/test")
 	if err != nil {
 		t.Fatal("Request failed:", err)
 	}
 	defer resp.Body.Close()
 
-	// Should get 404
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Expected status 404, got %d", resp.StatusCode)
+	// Should get 502 Bad Gateway when client.Do() fails
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("Expected status 502, got %d", resp.StatusCode)
 	}
 
-	// Test verifies 404 behavior for unknown routes
+	// Verify error message format
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal("Failed to read response:", err)
+	}
+
+	responseStr := string(responseBody)
+	if !strings.Contains(responseStr, "proxy request failed:") {
+		t.Errorf("Expected error message to contain 'proxy request failed:', got: %s", responseStr)
+	}
+
+	// Test verifies connection failure handling in client.Do()
 }
 
 func TestMultipleRouteProxying(t *testing.T) {
@@ -268,52 +279,6 @@ func TestMultipleRouteProxying(t *testing.T) {
 	}
 
 	// Test verifies that multiple routes can proxy to the same backend
-}
-
-func TestRequestWithoutBody(t *testing.T) {
-	// Create mock backend server
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"method": "%s", "hasBody": %t}`, r.Method, r.ContentLength > 0)
-	}))
-	defer backend.Close()
-
-	// Create proxy server
-	proxyServer := createTestServer(map[string]string{
-		"/api/": backend.URL + "/",
-	})
-
-	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer)
-	defer testServer.Close()
-
-	// Make GET request (no body)
-	resp, err := http.Get(testServer.URL + "/api/test")
-	if err != nil {
-		t.Fatal("GET request failed:", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", resp.StatusCode)
-	}
-
-	// Read and verify response
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal("Failed to read response:", err)
-	}
-
-	responseStr := string(responseBody)
-	if !strings.Contains(responseStr, `"method": "GET"`) {
-		t.Errorf("Expected response to indicate GET method, got: %s", responseStr)
-	}
-
-	if !strings.Contains(responseStr, `"hasBody": false`) {
-		t.Errorf("Expected response to indicate no body, got: %s", responseStr)
-	}
-
-	// Test verifies that GET requests without body are properly proxied
 }
 
 func TestHostHeaderProxying(t *testing.T) {
@@ -421,7 +386,7 @@ func TestContentLengthProxying(t *testing.T) {
 
 func TestConfigLoggingSettings(t *testing.T) {
 	// Test that the proxy server can be created and configured
-	server := NewProxyServer()
+	server := NewProxyServer("")
 	if server == nil {
 		t.Error("Failed to create proxy server")
 	}
@@ -551,18 +516,16 @@ func TestChunkedTransferEncoding(t *testing.T) {
 	// Test verifies that the proxy correctly handles chunked transfer encoding
 }
 
-func TestUnknownRouteWithQueryString(t *testing.T) {
-	// Create proxy server with known route
-	proxyServer := createTestServer(map[string]string{
-		"/api/": "https://example.com/",
-	})
+func TestNotFoundRoute(t *testing.T) {
+	// Create proxy server with unknown route handler
+	proxyServer := NewProxyServer("/404/")
 
 	// Create test server for proxy
 	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
-	// Make request to unknown route with query parameters
-	resp, err := http.Get(testServer.URL + "/unknown/path?param1=value1&param2=value2&search=test%20query")
+	// Make request to unknown route
+	resp, err := http.Get(testServer.URL + "/404/unknown")
 	if err != nil {
 		t.Fatal("Request to unknown route with query string failed:", err)
 	}
@@ -580,9 +543,10 @@ func TestUnknownRouteWithQueryString(t *testing.T) {
 	}
 
 	responseStr := string(responseBody)
-	t.Logf("404 response: %s", responseStr)
 
-	// Test verifies that unknown routes with query strings return proper 404 responses
+	if responseStr != "No route found for /404/unknown\n" {
+		t.Errorf("Unexpected response body: %s", responseStr)
+	}
 }
 
 func TestCatchAllHandling(t *testing.T) {

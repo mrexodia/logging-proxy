@@ -1,6 +1,7 @@
 server:
   port: 5601
   host: "localhost"
+  not_found: "/404/"
 
 logging:
   console: true           # Enable simple console output

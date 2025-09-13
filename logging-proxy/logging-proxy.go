@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 
 	loggingproxy "github.com/mrexodia/logging-proxy"
@@ -22,8 +23,9 @@ type Route struct {
 
 type Config struct {
 	Server struct {
-		Port int    `yaml:"port"`
-		Host string `yaml:"host"`
+		Port     int    `yaml:"port"`
+		Host     string `yaml:"host"`
+		NotFound string `yaml:"not_found"`
 	} `yaml:"server"`
 	Logging struct {
 		Console bool   `yaml:"console"`
@@ -39,7 +41,7 @@ func main() {
 		log.Fatal("Error loading config:", err)
 	}
 
-	server := loggingproxy.NewProxyServer()
+	proxy := loggingproxy.NewProxyServer(config.Server.NotFound)
 
 	// Configure logger
 	var logger loggingproxy.Logger = &loggingproxy.NoOpLogger{}
@@ -60,7 +62,7 @@ func main() {
 	hasCatchAll := false
 	for _, route := range config.Routes {
 		fmt.Printf("[route] %s -> %s\n", route.Pattern, route.Destination)
-		if err := server.AddRoute(route.Pattern, route.Destination, logger); err != nil {
+		if err := proxy.AddRoute(route.Pattern, route.Destination, logger); err != nil {
 			log.Fatalf("Failed to add route %s: %v", route.Pattern, err)
 		}
 		if route.Pattern == "/" {
@@ -69,9 +71,10 @@ func main() {
 	}
 
 	// Set up catch-all handler if no "/" route was configured
-	if !hasCatchAll {
-		fmt.Printf("Registering catch-all handler\n")
-		if err := server.AddRoute("/", "http://localhost:8080/404", &loggingproxy.NoOpLogger{}); err != nil {
+	if !hasCatchAll && config.Server.NotFound != "" {
+		notFoundUrl := fmt.Sprintf("http://%s:%d%s", config.Server.Host, config.Server.Port, config.Server.NotFound)
+		fmt.Printf("Registering catch-all handler: %s\n", notFoundUrl)
+		if err := proxy.AddRoute("/", notFoundUrl, logger); err != nil {
 			log.Fatalf("Failed to add catch-all route: %v", err)
 		}
 	}
@@ -79,12 +82,13 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	fmt.Printf("Proxy server starting on %s\n", addr)
 
-	// Display configured routes
-	for _, route := range config.Routes {
-		fmt.Printf("Route: %s -> %s\n", route.Pattern, route.Destination)
+	// Start proxy server
+	server := http.Server{
+		Addr:                         addr,
+		Handler:                      proxy,
+		DisableGeneralOptionsHandler: true,
 	}
-
-	if err := server.Start(addr); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal("Server failed:", err)
 	}
 }

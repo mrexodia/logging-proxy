@@ -18,9 +18,18 @@ type ProxyServer struct {
 	client *http.Client
 }
 
-func NewProxyServer() *ProxyServer {
+func NewProxyServer(notFoundEndpoint string) *ProxyServer {
+	mux := http.NewServeMux()
+	if notFoundEndpoint != "" {
+		if !strings.HasSuffix(notFoundEndpoint, "/") {
+			notFoundEndpoint += "/"
+		}
+		mux.HandleFunc(notFoundEndpoint, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, fmt.Sprintf("No route found for %s", r.URL.String()), http.StatusNotFound)
+		})
+	}
 	return &ProxyServer{
-		mux:    http.NewServeMux(),
+		mux:    mux,
 		client: &http.Client{},
 	}
 }
@@ -52,16 +61,6 @@ func (s *ProxyServer) AddRoute(pattern string, destination string, logger Logger
 	})
 
 	return nil
-}
-
-func (s *ProxyServer) Start(addr string) error {
-	server := &http.Server{
-		Addr:                         addr,
-		Handler:                      s,
-		DisableGeneralOptionsHandler: true,
-	}
-
-	return server.ListenAndServe()
 }
 
 type readCloser struct {
@@ -192,10 +191,6 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		responseLogWriter.Close()
 	}()
 
-	// Stream the response body
-	_, err = io.Copy(w, responseBody)
-	if err != nil {
-		// We already wrote the response, so we can't return an error to the client
-		// TODO: when does this happen?
-	}
+	// Stream the response body (no error checking, because we already wrote the response)
+	io.Copy(w, responseBody)
 }
