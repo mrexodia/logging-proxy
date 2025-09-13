@@ -6,132 +6,145 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
+type Config struct {
+	Server struct {
+		Port int    `yaml:"port"`
+		Host string `yaml:"host"`
+	} `yaml:"server"`
+	Logging struct {
+		Console   bool   `yaml:"console"`
+		ServerURL string `yaml:"server_url"`
+		Default   bool   `yaml:"default"`
+	} `yaml:"logging"`
+	Routes map[string]Route `yaml:"routes"`
+}
+
+// Route defines a proxy route configuration.
+// Pattern uses Go's http.ServeMux pattern syntax (Go 1.22+):
+//   - "/api/" matches "/api/" and everything under it (like "/api/v1/chat")
+//   - "/exact" matches only "/exact"
+//   - "/" is a catch-all that matches everything
+//   - Wildcards like "{id}" and "{path...}" are supported
+type Route struct {
+	Pattern     string `yaml:"pattern"`
+	Destination string `yaml:"destination"`
+	Logging     bool   `yaml:"logging"`
+}
+
 type ProxyServer struct {
 	Config        *Config
-	Routes        map[string]*Route
-	loggingClient *LoggingClient
+	loggingClient *http.Client
+	mux           *http.ServeMux
 }
 
 func NewProxyServer(config *Config) *ProxyServer {
 	server := &ProxyServer{
 		Config:        config,
-		Routes:        make(map[string]*Route),
-		loggingClient: NewLoggingClient(config.Logging.ServerURL),
+		loggingClient: &http.Client{Timeout: 30 * time.Second},
+		mux:           http.NewServeMux(),
 	}
 
-	// Initialize routes map from the config map
-	for _, route := range config.Routes {
-		routeCopy := route // Make a copy to avoid pointer issues
-		server.Routes[route.Source] = &routeCopy
-	}
+	// Setup HTTP patterns
+	server.setupPatterns()
 
 	return server
 }
 
-// findMatchingRoute finds the best matching route for the given path
-func (s *ProxyServer) findMatchingRoute(path string) *Route {
-	var bestMatch *Route
-	var bestLength int
+// setupPatterns configures HTTP patterns like experiment.go
+func (s *ProxyServer) setupPatterns() {
+	wildcardRegex := regexp.MustCompile(`{[a-zA-Z0-9_.]+`)
+	registerCatchAll := true
 
-	for sourcePath, route := range s.Routes {
-		trimmedSource := strings.TrimSuffix(sourcePath, "/")
-		if strings.HasPrefix(path, trimmedSource) && len(trimmedSource) > bestLength {
-			bestMatch = route
-			bestLength = len(trimmedSource)
+	for _, route := range s.Config.Routes {
+		pattern := route.Pattern
+		fmt.Printf("[route] %s -> %s\n", pattern, route.Destination)
+
+		if wildcardRegex.MatchString(pattern) {
+			panic(fmt.Sprintf("Pattern %s contains a wildcard, which is not supported\n", pattern))
 		}
+
+		// If the user specifies a catch-all route, we don't need to register our own handler
+		if pattern == "/" {
+			registerCatchAll = false
+		}
+
+		// Append a named wildcard so we can extract the path from the request
+		if strings.HasSuffix(pattern, "/") {
+			pattern += "{path...}"
+		}
+
+		s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			s.handlePatternRequest(w, r, route)
+		})
 	}
 
-	return bestMatch
-}
-
-// transformPath converts the source path to the destination path
-func transformPath(originalPath, sourcePath, destinationURL string) (string, error) {
-	sourceTrimmed := strings.TrimSuffix(sourcePath, "/")
-	remainingPath := strings.TrimPrefix(originalPath, sourceTrimmed)
-
-	destURL, err := url.Parse(destinationURL)
-	if err != nil {
-		return "", err
+	if registerCatchAll {
+		fmt.Printf("Registering catch-all handler\n")
+		s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			s.handleUnknownRoute(w, r)
+		})
+	} else {
+		fmt.Printf("Skipping catch-all handler\n")
 	}
-
-	destPath := strings.TrimSuffix(destURL.Path, "/")
-	if destPath == "" || destPath == "/" {
-		return remainingPath, nil
-	}
-
-	return destPath + remainingPath, nil
-}
-
-func (s *ProxyServer) HandleRequest(w http.ResponseWriter, r *http.Request) {
-	s.handleRequest(w, r)
 }
 
 func (s *ProxyServer) Start() {
-	// Single handler for all requests
-	http.HandleFunc("/", s.handleRequest)
-
 	// Display configured routes
-	for sourcePath, route := range s.Routes {
+	for _, route := range s.Config.Routes {
 		loggingStatus := "logging disabled"
 		if route.Logging {
 			loggingStatus = "logging enabled"
 		}
 		fmt.Printf("Route: %s -> %s (%s)\n",
-			sourcePath, route.Destination, loggingStatus)
+			route.Pattern, route.Destination, loggingStatus)
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.Config.Server.Host, s.Config.Server.Port)
 	fmt.Printf("Proxy server starting on %s\n", addr)
 	fmt.Printf("Logging server: %s\n", s.Config.Logging.ServerURL)
 
-	log.Fatal(http.ListenAndServe(addr, nil))
-}
-
-// handleRequest processes incoming requests with streaming duplex architecture
-func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-
-	// Generate unique request ID
-	requestID := uuid.New().String()
-
-	// Find matching route
-	route := s.findMatchingRoute(r.URL.Path)
-	if route == nil {
-		// Log unknown route to console if console logging is enabled
-		if s.Config.Logging.Console {
-			loggingStatus := "no-log"
-			if s.Config.Logging.Default {
-				loggingStatus = "log"
-			}
-			fmt.Printf("%s [%s] %s %s -> NOT_FOUND [%s]\n",
-				start.Format("2006-01-02 15:04:05"),
-				requestID[:8],
-				r.Method,
-				r.URL.Path,
-				loggingStatus)
-		}
-
-		// If default logging is enabled, log the 404 request/response
-		if s.Config.Logging.Default {
-			s.logUnknownRoute(w, r, requestID)
-		} else {
-			http.NotFound(w, r)
-		}
-		return
+	server := &http.Server{
+		Addr:                         addr,
+		Handler:                      s.mux,
+		DisableGeneralOptionsHandler: true,
 	}
 
-	// Determine if this route should be logged
-	shouldLog := route.Logging
+	log.Fatal(server.ListenAndServe())
+}
 
+// handlePatternRequest processes requests that match a configured pattern
+func (s *ProxyServer) handlePatternRequest(w http.ResponseWriter, r *http.Request, route Route) {
+	start := time.Now()
+	requestID := uuid.New().String()
+
+	// Extract path from the pattern match
+	path := r.PathValue("path")
+	destinationUrl := route.Destination
+	if len(path) > 0 {
+		joined, err := url.JoinPath(route.Destination, path)
+		if err != nil {
+			log.Printf("Error joining path: %v", err)
+			http.Error(w, "Invalid destination URL", http.StatusInternalServerError)
+			return
+		}
+		destinationUrl = joined
+	}
+
+	if len(r.URL.RawQuery) > 0 {
+		destinationUrl += "?" + r.URL.RawQuery
+	}
+
+	// Console logging
 	if s.Config.Logging.Console {
 		loggingStatus := "no-log"
-		if shouldLog {
+		if route.Logging {
 			loggingStatus = "log"
 		}
 		fmt.Printf("%s [%s] %s %s -> %s [%s]\n",
@@ -139,33 +152,49 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 			requestID[:8],
 			r.Method,
 			r.URL.Path,
-			route.Destination,
+			destinationUrl,
 			loggingStatus)
 	}
 
-	// Transform the path
-	targetPath, err := transformPath(r.URL.Path, route.Source, route.Destination)
-	if err != nil {
-		http.Error(w, "Invalid destination URL", http.StatusInternalServerError)
-		return
-	}
-
 	// Parse target URL
-	targetURL, err := url.Parse(route.Destination)
+	targetURL, err := url.Parse(destinationUrl)
 	if err != nil {
 		http.Error(w, "Invalid destination URL", http.StatusInternalServerError)
 		return
 	}
-
-	// Build target URL
-	targetURL.Path = targetPath
-	targetURL.RawQuery = r.URL.RawQuery
 
 	// Create the duplex streaming proxy request
-	err = s.proxyWithDuplex(w, r, targetURL, requestID, route, shouldLog)
+	err = s.proxyWithDuplex(w, r, targetURL, requestID, &route, route.Logging)
 	if err != nil {
 		log.Printf("Proxy error for %s: %v", requestID, err)
 		http.Error(w, "Proxy error", http.StatusBadGateway)
+	}
+}
+
+// handleUnknownRoute handles requests that don't match any configured pattern
+func (s *ProxyServer) handleUnknownRoute(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	requestID := uuid.New().String()
+
+	// Log unknown route to console if console logging is enabled
+	if s.Config.Logging.Console {
+		loggingStatus := "no-log"
+		if s.Config.Logging.Default {
+			loggingStatus = "log"
+		}
+		fmt.Printf("%s [%s] %s %s -> NOT_FOUND [%s]\n",
+			start.Format("2006-01-02 15:04:05"),
+			requestID[:8],
+			r.Method,
+			r.URL.Path,
+			loggingStatus)
+	}
+
+	// If default logging is enabled, log the 404 request/response
+	if s.Config.Logging.Default {
+		s.logUnknownRoute(w, r, requestID)
+	} else {
+		http.Error(w, "custom 404 page", http.StatusNotFound)
 	}
 }
 
@@ -380,7 +409,7 @@ func (s *ProxyServer) streamToLoggingServer(reader io.Reader, requestID, streamT
 	}()
 
 	// Send to logging server using the pipe
-	url := fmt.Sprintf("%s/%s/%s", s.loggingClient.serverURL, requestID, streamType)
+	url := fmt.Sprintf("%s/%s/%s", s.Config.Logging.ServerURL, requestID, streamType)
 	logReq, err := http.NewRequest("PUT", url, pipeReader)
 	if err != nil {
 		log.Printf("Error creating logging request for %s %s: %v", requestID, streamType, err)
@@ -389,7 +418,7 @@ func (s *ProxyServer) streamToLoggingServer(reader io.Reader, requestID, streamT
 
 	logReq.Header.Set("Content-Type", "application/octet-stream")
 
-	logResp, err := s.loggingClient.client.Do(logReq)
+	logResp, err := s.loggingClient.Do(logReq)
 	if err != nil {
 		log.Printf("Error sending %s log for %s: %v", streamType, requestID, err)
 		return

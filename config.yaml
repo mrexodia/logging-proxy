@@ -9,10 +9,10 @@ logging:
 
 routes:
   openrouter:
-    source: "/api/v1/"
+    pattern: "/api/v1/"
     destination: "https://openrouter.ai/"
     logging: true
   lmstudio:
-    source: "/lmstudio"
+    pattern: "/lmstudio/"
     destination: "http://127.0.0.1:1234/"
     logging: true

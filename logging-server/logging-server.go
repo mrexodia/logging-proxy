@@ -16,10 +16,10 @@ func main() {
 	http.HandleFunc("/", handleLogRequest)
 	fmt.Println("Logging server starting on :8080")
 	fmt.Println("Saving logs to ./logs/ directory")
-	
+
 	// Ensure logs directory exists
 	os.MkdirAll("logs", 0755)
-	
+
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
@@ -39,7 +39,7 @@ type RequestMetadata struct {
 
 func handleLogRequest(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-	
+
 	if r.Method != "PUT" {
 		http.Error(w, "Only PUT method allowed", http.StatusMethodNotAllowed)
 		return
@@ -111,7 +111,7 @@ func handleLogRequest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Warning: Failed to save metadata %s: %v", metadataFilename, err)
 	}
 
-	log.Printf("Saved %s for request %s (%d bytes) -> %s", 
+	log.Printf("Saved %s for request %s (%d bytes) -> %s",
 		streamType, requestID[:8], bytesWritten, filepath.Base(filename))
 
 	w.WriteHeader(http.StatusCreated)

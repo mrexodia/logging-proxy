@@ -94,14 +94,14 @@ func TestNewArchitecture(t *testing.T) {
 
 	// Create test config directly
 	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
-		"test": {Source: "/api/v1/", Destination: backend.URL + "/", Logging: true},
+		"test": {Pattern: "/api/v1/", Destination: backend.URL + "/", Logging: true},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Make a test request
@@ -198,14 +198,14 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 
 	// Create test config directly
 	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
-		"streaming_test": {Source: "/api/v1/", Destination: backend.URL + "/", Logging: true},
+		"streaming_test": {Pattern: "/api/v1/", Destination: backend.URL + "/", Logging: true},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Make streaming request
@@ -255,18 +255,18 @@ func TestConfigValidationNew(t *testing.T) {
 			Default   bool   `yaml:"default"`
 		}{Console: true, ServerURL: "http://localhost:8080", Default: true},
 		Routes: map[string]Route{
-			"test": {Source: "/api/v1/", Destination: "https://example.com/", Logging: true},
+			"test": {Pattern: "/api/v1/", Destination: "https://example.com/", Logging: true},
 		},
 	}
 
 	server := NewProxyServer(config)
 
-	if len(server.Routes) != 1 {
-		t.Errorf("Expected 1 route, got %d", len(server.Routes))
+	if len(server.Config.Routes) != 1 {
+		t.Errorf("Expected 1 route, got %d", len(server.Config.Routes))
 	}
 
-	route := server.Routes["/api/v1/"]
-	if route == nil {
+	route, exists := server.Config.Routes["test"]
+	if !exists {
 		t.Error("Route not found")
 	}
 
@@ -286,14 +286,14 @@ func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
 
 	// Create test config with default logging enabled
 	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
-		"known": {Source: "/api/", Destination: "https://example.com/", Logging: true},
+		"known": {Pattern: "/api/", Destination: "https://example.com/", Logging: true},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Make request to unknown route
@@ -328,14 +328,14 @@ func TestUnknownRouteWithDefaultLoggingDisabled(t *testing.T) {
 
 	// Create test config with default logging disabled
 	config := createTestConfig(loggingServer.URL(), false, false, map[string]Route{
-		"known": {Source: "/api/", Destination: "https://example.com/", Logging: true},
+		"known": {Pattern: "/api/", Destination: "https://example.com/", Logging: true},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Make request to unknown route
@@ -377,15 +377,15 @@ func TestRouteSpecificLoggingOverride(t *testing.T) {
 
 	// Create test config with mixed logging settings
 	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
-		"logged_route":   {Source: "/api/", Destination: backend.URL + "/", Logging: true},
-		"unlogged_route": {Source: "/nolog/", Destination: backend.URL + "/", Logging: false},
+		"logged_route":   {Pattern: "/api/", Destination: backend.URL + "/", Logging: true},
+		"unlogged_route": {Pattern: "/nolog/", Destination: backend.URL + "/", Logging: false},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Clear logging server state
@@ -448,14 +448,14 @@ func TestRequestWithoutBody(t *testing.T) {
 
 	// Create test config
 	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
-		"test": {Source: "/api/", Destination: backend.URL + "/", Logging: true},
+		"test": {Pattern: "/api/", Destination: backend.URL + "/", Logging: true},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Make GET request (no body)
@@ -511,14 +511,14 @@ func TestHostHeaderLogging(t *testing.T) {
 
 	// Create test config
 	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
-		"test": {Source: "/api/", Destination: backend.URL + "/", Logging: true},
+		"test": {Pattern: "/api/", Destination: backend.URL + "/", Logging: true},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Make request with explicit Host header
@@ -584,14 +584,14 @@ func TestSpecialHeadersLogging(t *testing.T) {
 
 	// Create test config
 	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
-		"test": {Source: "/api/", Destination: backend.URL + "/", Logging: true},
+		"test": {Pattern: "/api/", Destination: backend.URL + "/", Logging: true},
 	})
 
 	// Create proxy server
 	proxyServer := NewProxyServer(config)
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(http.HandlerFunc(proxyServer.HandleRequest))
+	testServer := httptest.NewServer(proxyServer.mux)
 	defer testServer.Close()
 
 	// Make POST request with body to test Content-Length
@@ -678,7 +678,7 @@ func TestConsoleLoggingBehavior(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create test config
 			config := createTestConfig(loggingServer.URL(), tc.consoleEnabled, tc.defaultLogging, map[string]Route{
-				"test": {Source: "/api/", Destination: backend.URL + "/", Logging: tc.routeLogging},
+				"test": {Pattern: "/api/", Destination: backend.URL + "/", Logging: tc.routeLogging},
 			})
 
 			// Verify config was parsed correctly
@@ -688,6 +688,116 @@ func TestConsoleLoggingBehavior(t *testing.T) {
 
 			if config.Logging.Default != tc.defaultLogging {
 				t.Errorf("Expected default logging %t, got %t", tc.defaultLogging, config.Logging.Default)
+			}
+		})
+	}
+}
+
+func TestExperimentHttpExamples(t *testing.T) {
+	// Create mock backend servers
+	lmStudioServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "LMStudio response: %s %s", r.Method, r.URL.Path)
+	}))
+	defer lmStudioServer.Close()
+
+	openRouterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "OpenRouter response: %s %s", r.Method, r.URL.Path)
+	}))
+	defer openRouterServer.Close()
+
+	mockFileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/static/mockfile.txt" {
+			fmt.Fprintf(w, "Mock file content")
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockFileServer.Close()
+
+	// Create test config matching experiment.go routes
+	config := &Config{
+		Logging: struct {
+			Console   bool   `yaml:"console"`
+			ServerURL string `yaml:"server_url"`
+			Default   bool   `yaml:"default"`
+		}{Console: false, ServerURL: "http://localhost:8080", Default: false},
+		Routes: map[string]Route{
+			"lmstudio":   {Pattern: "/lmstudio/", Destination: lmStudioServer.URL + "/", Logging: false},
+			"openrouter": {Pattern: "/openrouter/", Destination: openRouterServer.URL + "/api/v1/", Logging: false},
+			"mockfile":   {Pattern: "/lmstudio/mockfile", Destination: mockFileServer.URL + "/static/mockfile.txt", Logging: false},
+		},
+	}
+
+	proxyServer := NewProxyServer(config)
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer.mux)
+	defer testServer.Close()
+
+	// Test cases matching experiment.http examples
+	testCases := []struct {
+		name           string
+		method         string
+		path           string
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:           "LMStudio subpath routing",
+			method:         "GET",
+			path:           "/lmstudio/subpath1/subpath2?q1=1&q2=2",
+			expectedStatus: 200,
+			expectedBody:   "LMStudio response: GET /subpath1/subpath2",
+		},
+		{
+			name:           "OpenRouter models endpoint",
+			method:         "GET",
+			path:           "/openrouter/models?q=7",
+			expectedStatus: 200,
+			expectedBody:   "OpenRouter response: GET /api/v1/models",
+		},
+		{
+			name:           "Specific mockfile endpoint",
+			method:         "GET",
+			path:           "/lmstudio/mockfile?query=true",
+			expectedStatus: 200,
+			expectedBody:   "Mock file content",
+		},
+		{
+			name:           "Unknown route returns 404",
+			method:         "DELETE",
+			path:           "/unknown/path",
+			expectedStatus: 404,
+			expectedBody:   "custom 404 page",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, testServer.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			client := &http.Client{}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.expectedStatus {
+				t.Errorf("Expected status %d, got %d", tc.expectedStatus, resp.StatusCode)
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			bodyStr := strings.TrimSpace(string(body))
+			if !strings.Contains(bodyStr, tc.expectedBody) {
+				t.Errorf("Expected body to contain '%s', got '%s'", tc.expectedBody, bodyStr)
 			}
 		})
 	}

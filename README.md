@@ -1,16 +1,8 @@
 # Logging Proxy
 
-A high-performance HTTP proxy server with duplex streaming support and comprehensive logging capabilities. Built in Go, this proxy allows you to route API requests to multiple destinations while capturing full request/response data for analysis and debugging.
+High performance HTTP reverse proxy server. Built in Go, this proxy allows you to route API requests to multiple destinations while capturing full request/response data for analysis and debugging.
 
-## Features
-
-- **Duplex Streaming**: Real-time bidirectional streaming support for API requests
-- **Route-Based Proxying**: Configure multiple routes with different destinations
-- **Comprehensive Logging**: Optional per-route logging with request/response capture
-- **Console Monitoring**: Real-time request tracking in the console
-- **Request Replay**: Captured logs include original proxy paths for easy replay
-- **Unique Request IDs**: Every request gets a UUID for correlation
-- **Flexible Configuration**: YAML-based configuration with per-route settings
+It was built to capture LLM traces for OpenRouter, without having to set up heavy enterprise routers like [LiteLLM](https://github.com/BerriAI/litellm).
 
 ## Architecture
 
@@ -36,10 +28,10 @@ logging:
 
 routes:
   openrouter:
-    source: "/api/v1/"
+    pattern: "/api/v1/"
     destination: "https://openrouter.ai/"
   lmstudio:
-    source: "/lmstudio"
+    pattern: "/lmstudio/"
     destination: "http://127.0.0.1:1234/"
     logging: false        # Disable logging for this route
 ```
@@ -51,7 +43,7 @@ routes:
 - **logging.console**: Enable/disable console request monitoring
 - **logging.server_url**: URL of the logging server
 - **logging.default**: Log unknown routes and 404 responses
-- **routes**: Map of route configurations with source/destination mappings
+- **routes**: Map of route configurations with pattern/destination mappings
 
 ## Running the Application
 
@@ -65,7 +57,7 @@ routes:
    ```bash
    go run ./logging-proxy
    ```
-   The proxy will start on the configured port (default: 5601).
+   The proxy will start on the configured port (default: `5601`).
 
 ## Testing
 
@@ -135,7 +127,7 @@ The project includes `test.http` with example requests for manual testing using 
 ### Request Flow
 
 1. **Client** sends request to proxy (e.g., `localhost:5601/lmstudio/v1/chat/completions`)
-2. **Proxy** matches the route (`/lmstudio` → `http://127.0.0.1:1234/`)
+2. **Proxy** matches the route (`/lmstudio/` → `http://127.0.0.1:1234/`)
 3. **Path transformation** converts `/lmstudio/v1/chat/completions` → `/v1/chat/completions`
 4. **Duplex streaming** forwards request to destination while logging (if enabled)
 5. **Response streaming** returns data to client while logging response
@@ -143,10 +135,23 @@ The project includes `test.http` with example requests for manual testing using 
 
 ### Route Matching
 
-Routes use prefix matching with longest match wins:
+Routes use Go's [http.ServeMux](https://pkg.go.dev/net/http#hdr-Patterns-ServeMux) pattern matching:
+
+**Pattern Types:**
+- `/lmstudio/` - Matches `/lmstudio/` and all subpaths
+- `GET /lmstudio/file.txt` - Matches exactly `/lmstudio/file.txt`, no subpaths, just the `GET` method
+- `GET example.com/test/{$}` - Matches `Host: example.com`, path `/test` and `/test/`, but not `/test/foo`
+- `POST example.com/test/` - Matches `Host: example.com` and anything under `/test/`
+- `"/"` - Catch-all that matches everything
+
+**Note**: Wildcards (except `{$}`) are **not** supported and will be rejected on startup.
+
+**Example:**
 - Request: `/lmstudio/v1/chat/completions`
-- Route: `/lmstudio` → `http://127.0.0.1:1234/`
+- Pattern: `/lmstudio/` → `http://127.0.0.1:1234/`
 - Result: `http://127.0.0.1:1234/v1/chat/completions`
+
+In general, more specific patterns win when multiple patterns could match. If you create identical patterns the proxy will panic on startup.
 
 ### Logging Format
 
@@ -162,8 +167,7 @@ Log files are named: `{timestamp}_{requestID}_{request|response}.bin`
 When `logging.console` is enabled, you'll see real-time request monitoring:
 
 ```
-2024-01-15 10:30:45 [a1b2c3d4] POST /lmstudio/v1/chat/completions -> http://127.0.0.1:1234/ [log]
-2024-01-15 10:30:46 [a1b2c3d4] Response completed (1.2s)
+2025-09-13 02:11:09 [092d0424] POST /lmstudio/v1/chat/completions -> http://127.0.0.1:1234/v1/chat/completions [log]
 ```
 
 ## Future Enhancements
