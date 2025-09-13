@@ -30,17 +30,18 @@ func NewFileLogger(logDir string) (*FileLogger, error) {
 }
 
 // LogRequest logs a request with its metadata and body stream to a file
-func (f *FileLogger) LogRequest(metadata RequestMetadata, requestStream io.Reader, request *http.Request) error {
+func (f *FileLogger) LogRequest(metadata RequestMetadata, requestStream io.ReadCloser, request *http.Request) error {
 	return f.logStream(metadata, requestStream, "request", request, nil)
 }
 
 // LogResponse logs a response with its metadata and body stream to a file
-func (f *FileLogger) LogResponse(metadata RequestMetadata, responseStream io.Reader, response *http.Response) error {
+func (f *FileLogger) LogResponse(metadata RequestMetadata, responseStream io.ReadCloser, response *http.Response) error {
 	return f.logStream(metadata, responseStream, "response", nil, response)
 }
 
 // logStream handles the common logic for logging request/response streams
-func (f *FileLogger) logStream(metadata RequestMetadata, stream io.Reader, streamType string, request *http.Request, response *http.Response) error {
+func (f *FileLogger) logStream(metadata RequestMetadata, stream io.ReadCloser, streamType string, request *http.Request, response *http.Response) error {
+	defer stream.Close()
 	timestamp := time.Now().Format("2006-01-02_15-04-05.000")
 	filename := fmt.Sprintf("%s_%s_%s.bin", timestamp, metadata.ID[:8], streamType)
 	filePath := filepath.Join(f.LogDir, filename)

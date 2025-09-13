@@ -106,6 +106,7 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 	// Split request body stream for logging
 	requestLogReader, requestLogWriter := io.Pipe()
 	teeReader := io.TeeReader(originalReq.Body, requestLogWriter)
+	defer originalReq.Body.Close()
 	go logger.LogRequest(metadata, requestLogReader, originalReq)
 
 	// Create and execute the proxy request synchronously
