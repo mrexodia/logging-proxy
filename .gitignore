@@ -10,6 +10,7 @@
 /logging-server/logging-server
 
 logs*/
+test_logs/
 
 # Test binary, built with `go test -c`
 *.test

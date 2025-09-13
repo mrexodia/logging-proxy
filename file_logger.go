@@ -28,13 +28,13 @@ func NewFileLogger(logDir string) (*FileLogger, error) {
 }
 
 // LogRequest logs a request with its metadata and raw HTTP stream to a file
-func (f *FileLogger) LogRequest(metadata RequestMetadata, timestamp time.Time, rawRequestStream io.ReadCloser) error {
-	return f.logRawStream(metadata, timestamp, rawRequestStream, "request")
+func (f *FileLogger) LogRequest(metadata RequestMetadata, timestamp time.Time, rawRequestStream io.ReadCloser) {
+	f.logRawStream(metadata, timestamp, rawRequestStream, "request")
 }
 
 // LogResponse logs a response with its metadata and raw HTTP stream to a file
-func (f *FileLogger) LogResponse(metadata RequestMetadata, timestamp time.Time, rawResponseStream io.ReadCloser) error {
-	return f.logRawStream(metadata, timestamp, rawResponseStream, "response")
+func (f *FileLogger) LogResponse(metadata RequestMetadata, timestamp time.Time, rawResponseStream io.ReadCloser) {
+	f.logRawStream(metadata, timestamp, rawResponseStream, "response")
 }
 
 type fileLogMetadata struct {
@@ -45,7 +45,7 @@ type fileLogMetadata struct {
 }
 
 // logRawStream handles the common logic for logging raw HTTP streams
-func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time, rawStream io.ReadCloser, streamType string) error {
+func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time, rawStream io.ReadCloser, streamType string) {
 	defer rawStream.Close()
 
 	timestampStr := timestamp.Format("2006-01-02_15-04-05.000")
@@ -55,14 +55,16 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	// Create the log file
 	logFile, err := os.Create(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to create log file %s: %w", filePath, err)
+		fmt.Printf("Failed to create log file %s: %v\n", filePath, err)
+		return
 	}
 	defer logFile.Close()
 
 	// Write raw HTTP stream (headers + body already combined)
 	bytesWritten, err := io.Copy(logFile, rawStream)
 	if err != nil {
-		return fmt.Errorf("failed to write raw HTTP stream: %w", err)
+		fmt.Printf("Failed to write raw HTTP stream: %v\n", err)
+		return
 	}
 
 	// Create and save metadata
@@ -78,7 +80,8 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 
 	metadataFile, err := os.Create(metadataPath)
 	if err != nil {
-		return fmt.Errorf("failed to create metadata file %s: %w", metadataPath, err)
+		fmt.Printf("Failed to create metadata file %s: %v\n", metadataPath, err)
+		return
 	}
 	defer metadataFile.Close()
 
@@ -86,9 +89,9 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	encoder.SetIndent("", "  ")
 	err = encoder.Encode(logMetadata)
 	if err != nil {
-		return fmt.Errorf("failed to write metadata file %s: %w", metadataPath, err)
+		fmt.Printf("Failed to write metadata file %s: %v\n", metadataPath, err)
+		return
 	}
 
 	log.Printf("Saved %s %s (%d bytes) -> %s", streamType, metadata.ID[:8], bytesWritten, filename)
-	return nil
 }

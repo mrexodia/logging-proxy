@@ -87,8 +87,8 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		ID:             uuid.New().String(),
 		Pattern:        request.Pattern,
 		Method:         request.Method,
-		SourceURL:      *request.URL,
-		DestinationURL: destinationURL,
+		SourceURL:      request.URL.String(),
+		DestinationURL: destinationURL.String(),
 	}
 
 	// Split request body stream for logging
@@ -133,13 +133,14 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 			Reader: io.MultiReader(&headerBuf, requestLogReader),
 			Closer: requestLogReader,
 		})
-
-		// Close the pipe writer
-		requestLogWriter.Close()
 	}()
 
 	// Execute the proxy request synchronously
 	response, err := s.client.Do(request)
+
+	// Close the request writer now that request body has been consumed
+	requestLogWriter.Close()
+
 	if err != nil {
 		// TODO: add a test case for this
 		http.Error(w, fmt.Sprintf("[%s] proxy request failed: %v", metadata.ID, err), http.StatusBadGateway)
@@ -186,11 +187,11 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 			Reader: io.MultiReader(&headerBuf, responseLogReader),
 			Closer: responseLogReader,
 		})
-
-		// Close the pipe writer
-		responseLogWriter.Close()
 	}()
 
 	// Stream the response body (no error checking, because we already wrote the response)
 	io.Copy(w, responseBody)
+
+	// Close the response writer now that response body has been consumed
+	responseLogWriter.Close()
 }
