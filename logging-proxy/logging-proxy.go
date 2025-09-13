@@ -9,6 +9,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Route defines a proxy route configuration.
+// Pattern uses Go's http.ServeMux pattern syntax (Go 1.22+):
+//   - "/api/" matches "/api/" and everything under it (like "/api/v1/chat")
+//   - "/exact" matches only "/exact"
+//   - "/" is a catch-all that matches everything
+//   - Wildcards like "{id}" and "{path...}" are supported
+type Route struct {
+	Pattern     string `yaml:"pattern"`
+	Destination string `yaml:"destination"`
+}
+
 type Config struct {
 	Server struct {
 		Port int    `yaml:"port"`
@@ -19,7 +30,7 @@ type Config struct {
 		File    bool   `yaml:"file"`
 		LogDir  string `yaml:"log_dir"`
 	} `yaml:"logging"`
-	Routes map[string]loggingproxy.Route `yaml:"routes"`
+	Routes map[string]Route `yaml:"routes"`
 }
 
 func main() {
@@ -30,7 +41,8 @@ func main() {
 
 	server := loggingproxy.NewProxyServer()
 
-	// Configure logger if needed
+	// Configure logger
+	var logger loggingproxy.Logger = &loggingproxy.NoOpLogger{}
 	if config.Logging.File {
 		logDir := config.Logging.LogDir
 		if logDir == "" {
@@ -39,7 +51,7 @@ func main() {
 		if fileLogger, err := loggingproxy.NewFileLogger(logDir); err != nil {
 			log.Printf("Failed to create file logger: %v, using no-op logger", err)
 		} else {
-			server.SetLogger(fileLogger)
+			logger = fileLogger
 		}
 		fmt.Printf("Logging: file logging to %s\n", logDir)
 	}
@@ -47,8 +59,10 @@ func main() {
 	// Add routes
 	hasCatchAll := false
 	for _, route := range config.Routes {
-		fmt.Printf("Route: %s -> %s\n", route.Pattern, route.Destination)
-		server.AddRoute(route.Pattern, route.Destination)
+		fmt.Printf("[route] %s -> %s\n", route.Pattern, route.Destination)
+		if err := server.AddRoute(route.Pattern, route.Destination, logger); err != nil {
+			log.Fatalf("Failed to add route %s: %v", route.Pattern, err)
+		}
 		if route.Pattern == "/" {
 			hasCatchAll = true
 		}
@@ -56,11 +70,23 @@ func main() {
 
 	// Set up catch-all handler if no "/" route was configured
 	if !hasCatchAll {
-		server.SetCatchAllHandler()
+		fmt.Printf("Registering catch-all handler\n")
+		if err := server.AddRoute("/", "http://localhost:8080/404", &loggingproxy.NoOpLogger{}); err != nil {
+			log.Fatalf("Failed to add catch-all route: %v", err)
+		}
 	}
 
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
-	server.Start(addr)
+	fmt.Printf("Proxy server starting on %s\n", addr)
+
+	// Display configured routes
+	for _, route := range config.Routes {
+		fmt.Printf("Route: %s -> %s\n", route.Pattern, route.Destination)
+	}
+
+	if err := server.Start(addr); err != nil {
+		log.Fatal("Server failed:", err)
+	}
 }
 
 func loadConfig(filename string) (*Config, error) {

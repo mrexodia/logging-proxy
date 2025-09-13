@@ -23,7 +23,7 @@ func NewFileLogger(logDir string) (*FileLogger, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
-	
+
 	return &FileLogger{
 		LogDir: logDir,
 	}, nil
@@ -53,28 +53,23 @@ func (f *FileLogger) logStream(metadata RequestMetadata, stream io.Reader, strea
 	defer file.Close()
 
 	// Write HTTP headers and body
-	bytesWritten, err := f.writeHTTPStream(file, streamType, request, response, stream, metadata.ProxyPath)
+	bytesWritten, err := f.writeHTTPStream(file, streamType, request, response, stream, "")
 	if err != nil {
 		return fmt.Errorf("failed to write HTTP stream: %w", err)
 	}
 
 	// Create and save metadata
 	logMetadata := FileLogMetadata{
-		RequestID:     metadata.ID,
 		StreamType:    streamType,
+		Metadata:      metadata,
 		Timestamp:     time.Now(),
-		ContentLength: bytesWritten,
 		Filename:      filename,
-		Method:        metadata.Method,
-		URL:           metadata.URL,
-		RemoteAddr:    metadata.RemoteAddr,
-		UserAgent:     metadata.UserAgent,
-		Route:         metadata.Route,
+		ContentLength: bytesWritten,
 	}
 
 	metadataFilename := fmt.Sprintf("%s_%s_%s_metadata.json", timestamp, metadata.ID[:8], streamType)
 	metadataPath := filepath.Join(f.LogDir, metadataFilename)
-	
+
 	if err := f.saveMetadata(logMetadata, metadataPath); err != nil {
 		log.Printf("Warning: Failed to save metadata %s: %v", metadataPath, err)
 	}
@@ -159,30 +154,23 @@ func (f *FileLogger) writeHTTPStream(writer io.Writer, streamType string, reques
 	}
 	totalBytes += int64(n)
 
-	// Write body if present
-	if bodyStream != nil {
-		copied, err := io.Copy(writer, bodyStream)
-		if err != nil {
-			return totalBytes, err
-		}
-		totalBytes += copied
+	// Write body
+	copied, err := io.Copy(writer, bodyStream)
+	if err != nil {
+		return totalBytes, err
 	}
+	totalBytes += copied
 
 	return totalBytes, nil
 }
 
 // FileLogMetadata represents metadata for file-based logging
 type FileLogMetadata struct {
-	RequestID     string    `json:"request_id"`
-	StreamType    string    `json:"stream_type"`
-	Timestamp     time.Time `json:"timestamp"`
-	ContentLength int64     `json:"content_length"`
-	Filename      string    `json:"filename"`
-	Method        string    `json:"method"`
-	URL           string    `json:"url"`
-	RemoteAddr    string    `json:"remote_addr"`
-	UserAgent     string    `json:"user_agent"`
-	Route         *Route    `json:"route,omitempty"`
+	StreamType    string          `json:"stream_type"`
+	Metadata      RequestMetadata `json:"metadata"`
+	Timestamp     time.Time       `json:"timestamp"`
+	Filename      string          `json:"filename"`
+	ContentLength int64           `json:"content_length"`
 }
 
 // saveMetadata saves the metadata to a JSON file

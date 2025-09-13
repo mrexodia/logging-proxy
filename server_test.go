@@ -12,18 +12,17 @@ import (
 )
 
 // Helper function to create test servers with routes
-func createTestServer(routes map[string]Route) *ProxyServer {
+func createTestServer(routes map[string]string) *ProxyServer {
 	server := NewProxyServer()
-	hasCatchAll := false
-	for _, route := range routes {
-		server.AddRoute(route.Pattern, route.Destination)
-		if route.Pattern == "/" {
-			hasCatchAll = true
+	logger := &NoOpLogger{}
+
+	for pattern, destination := range routes {
+		err := server.AddRoute(pattern, destination, logger)
+		if err != nil {
+			panic(err)
 		}
 	}
-	if !hasCatchAll {
-		server.SetCatchAllHandler()
-	}
+
 	return server
 }
 
@@ -36,12 +35,12 @@ func TestNewArchitecture(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server with test routes
-	proxyServer := createTestServer(map[string]Route{
-		"test": {Pattern: "/api/v1/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/v1/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make a test request
@@ -99,12 +98,12 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server with streaming test routes
-	proxyServer := createTestServer(map[string]Route{
-		"streaming_test": {Pattern: "/api/v1/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/v1/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make streaming request
@@ -139,7 +138,12 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 func TestConfigValidationNew(t *testing.T) {
 	// Test that server can be created and routes added correctly
 	server := NewProxyServer()
-	server.AddRoute("/api/v1/", "https://example.com/")
+	logger := &NoOpLogger{}
+
+	err := server.AddRoute("/api/v1/", "https://example.com/", logger)
+	if err != nil {
+		t.Errorf("Failed to add route: %v", err)
+	}
 
 	// Since we don't expose internal route storage, we'll just verify the server was created
 	if server == nil {
@@ -147,18 +151,20 @@ func TestConfigValidationNew(t *testing.T) {
 	}
 
 	// Test that multiple routes can be added
-	server.AddRoute("/api/v2/", "https://api.example.com/")
-	server.SetCatchAllHandler()
+	err = server.AddRoute("/api/v2/", "https://api.example.com/", logger)
+	if err != nil {
+		t.Errorf("Failed to add second route: %v", err)
+	}
 }
 
 func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
 	// Create proxy server with known route
-	proxyServer := createTestServer(map[string]Route{
-		"known": {Pattern: "/api/", Destination: "https://example.com/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": "https://example.com/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make request to unknown route
@@ -178,12 +184,12 @@ func TestUnknownRouteWithDefaultLoggingEnabled(t *testing.T) {
 
 func TestUnknownRouteWithDefaultLoggingDisabled(t *testing.T) {
 	// Create proxy server with known route
-	proxyServer := createTestServer(map[string]Route{
-		"known": {Pattern: "/api/", Destination: "https://example.com/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": "https://example.com/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make request to unknown route
@@ -210,13 +216,13 @@ func TestMultipleRouteProxying(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server with multiple routes pointing to the same backend
-	proxyServer := createTestServer(map[string]Route{
-		"api_route":   {Pattern: "/api/", Destination: backend.URL + "/"},
-		"other_route": {Pattern: "/other/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/":   backend.URL + "/",
+		"/other/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make request to first route
@@ -273,12 +279,12 @@ func TestRequestWithoutBody(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server
-	proxyServer := createTestServer(map[string]Route{
-		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make GET request (no body)
@@ -318,12 +324,12 @@ func TestHostHeaderProxying(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server
-	proxyServer := createTestServer(map[string]Route{
-		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make request with explicit Host header
@@ -370,12 +376,12 @@ func TestContentLengthProxying(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server
-	proxyServer := createTestServer(map[string]Route{
-		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make POST request with body to test Content-Length handling
@@ -421,9 +427,11 @@ func TestConfigLoggingSettings(t *testing.T) {
 	}
 
 	// Test setting different loggers
-	server.SetLogger(&NoOpLogger{})
-	server.AddRoute("/api/", "https://example.com/")
-	server.SetCatchAllHandler()
+	logger := &NoOpLogger{}
+	err := server.AddRoute("/api/", "https://example.com/", logger)
+	if err != nil {
+		t.Errorf("Failed to add route: %v", err)
+	}
 }
 
 func TestQueryStringProxying(t *testing.T) {
@@ -436,12 +444,12 @@ func TestQueryStringProxying(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server
-	proxyServer := createTestServer(map[string]Route{
-		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make request with query string
@@ -491,12 +499,12 @@ func TestChunkedTransferEncoding(t *testing.T) {
 	defer backend.Close()
 
 	// Create proxy server
-	proxyServer := createTestServer(map[string]Route{
-		"test": {Pattern: "/api/", Destination: backend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": backend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Create a custom HTTP request with Transfer-Encoding: chunked
@@ -545,12 +553,12 @@ func TestChunkedTransferEncoding(t *testing.T) {
 
 func TestUnknownRouteWithQueryString(t *testing.T) {
 	// Create proxy server with known route
-	proxyServer := createTestServer(map[string]Route{
-		"known": {Pattern: "/api/", Destination: "https://example.com/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": "https://example.com/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Make request to unknown route with query parameters
@@ -586,13 +594,13 @@ func TestCatchAllHandling(t *testing.T) {
 	defer catchAllBackend.Close()
 
 	// Create proxy server with a catch-all route (pattern "/" matches everything)
-	proxyServer := createTestServer(map[string]Route{
-		"specific":  {Pattern: "/api/", Destination: "https://example.com/"},
-		"catch_all": {Pattern: "/", Destination: catchAllBackend.URL + "/"},
+	proxyServer := createTestServer(map[string]string{
+		"/api/": "https://example.com/",
+		"/":     catchAllBackend.URL + "/",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Test cases for different paths
@@ -669,14 +677,14 @@ func TestExperimentHttpExamples(t *testing.T) {
 	defer mockFileServer.Close()
 
 	// Create proxy server matching experiment.go routes
-	proxyServer := createTestServer(map[string]Route{
-		"lmstudio":   {Pattern: "/lmstudio/", Destination: lmStudioServer.URL + "/"},
-		"openrouter": {Pattern: "/openrouter/", Destination: openRouterServer.URL + "/api/v1/"},
-		"mockfile":   {Pattern: "/lmstudio/mockfile", Destination: mockFileServer.URL + "/static/mockfile.txt"},
+	proxyServer := createTestServer(map[string]string{
+		"/lmstudio/":         lmStudioServer.URL + "/",
+		"/openrouter/":       openRouterServer.URL + "/api/v1/",
+		"/lmstudio/mockfile": mockFileServer.URL + "/static/mockfile.txt",
 	})
 
 	// Create test server for proxy
-	testServer := httptest.NewServer(proxyServer.mux)
+	testServer := httptest.NewServer(proxyServer)
 	defer testServer.Close()
 
 	// Test cases matching experiment.http examples
@@ -713,7 +721,7 @@ func TestExperimentHttpExamples(t *testing.T) {
 			method:         "DELETE",
 			path:           "/unknown/path",
 			expectedStatus: 404,
-			expectedBody:   "custom 404 page",
+			expectedBody:   "404 page not found",
 		},
 	}
 

@@ -12,49 +12,26 @@ import (
 	"github.com/google/uuid"
 )
 
-// Route defines a proxy route configuration.
-// Pattern uses Go's http.ServeMux pattern syntax (Go 1.22+):
-//   - "/api/" matches "/api/" and everything under it (like "/api/v1/chat")
-//   - "/exact" matches only "/exact"
-//   - "/" is a catch-all that matches everything
-//   - Wildcards like "{id}" and "{path...}" are supported
-type Route struct {
-	Pattern     string `yaml:"pattern"`
-	Destination string `yaml:"destination"`
-}
-
 type ProxyServer struct {
-	logger Logger
-	mux    *http.ServeMux
+	mux *http.ServeMux
 }
 
 func NewProxyServer() *ProxyServer {
 	return &ProxyServer{
-		logger: &NoOpLogger{},
-		mux:    http.NewServeMux(),
+		mux: http.NewServeMux(),
 	}
 }
 
-func (s *ProxyServer) SetLogger(logger Logger) {
-	s.logger = logger
+// ServeHTTP implements http.Handler interface
+func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mux.ServeHTTP(w, r)
 }
 
-func (s *ProxyServer) AddRoute(pattern, destination string) {
-	route := Route{
-		Pattern:     pattern,
-		Destination: destination,
-	}
-	s.addRouteHandler(route)
-}
-
-func (s *ProxyServer) addRouteHandler(route Route) {
+func (s *ProxyServer) AddRoute(pattern, destination string, logger Logger) error {
 	wildcardRegex := regexp.MustCompile(`{[a-zA-Z0-9_.]+`)
-	pattern := route.Pattern
-
-	fmt.Printf("[route] %s -> %s\n", pattern, route.Destination)
 
 	if wildcardRegex.MatchString(pattern) {
-		panic(fmt.Sprintf("Pattern %s contains a wildcard, which is not supported\n", pattern))
+		return fmt.Errorf("pattern %s contains a wildcard, which is not supported", pattern)
 	}
 
 	// Append a named wildcard so we can extract the path from the request
@@ -63,38 +40,31 @@ func (s *ProxyServer) addRouteHandler(route Route) {
 	}
 
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-		s.handlePatternRequest(w, r, route)
+		s.handlePatternRequest(w, r, destination, logger)
 	})
+
+	return nil
 }
 
-func (s *ProxyServer) SetCatchAllHandler() {
-	fmt.Printf("Registering catch-all handler\n")
-	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		s.handleUnknownRoute(w, r)
-	})
-}
-
-func (s *ProxyServer) Start(addr string) {
-	fmt.Printf("Proxy server starting on %s\n", addr)
-
+func (s *ProxyServer) Start(addr string) error {
 	server := &http.Server{
 		Addr:                         addr,
-		Handler:                      s.mux,
+		Handler:                      s,
 		DisableGeneralOptionsHandler: true,
 	}
 
-	log.Fatal(server.ListenAndServe())
+	return server.ListenAndServe()
 }
 
 // handlePatternRequest processes requests that match a configured pattern
-func (s *ProxyServer) handlePatternRequest(w http.ResponseWriter, r *http.Request, route Route) {
+func (s *ProxyServer) handlePatternRequest(w http.ResponseWriter, r *http.Request, destination string, logger Logger) {
 	requestID := uuid.New().String()
 
 	// Extract path from the pattern match
 	path := r.PathValue("path")
-	destinationUrl := route.Destination
+	destinationUrl := destination
 	if len(path) > 0 {
-		joined, err := url.JoinPath(route.Destination, path)
+		joined, err := url.JoinPath(destination, path)
 		if err != nil {
 			log.Printf("Error joining path: %v", err)
 			http.Error(w, "Invalid destination URL", http.StatusInternalServerError)
@@ -115,50 +85,31 @@ func (s *ProxyServer) handlePatternRequest(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Create the duplex streaming proxy request
-	err = s.proxyWithDuplex(w, r, targetURL, requestID, &route)
+	err = s.proxyWithDuplex(w, r, targetURL, requestID, logger)
 	if err != nil {
 		log.Printf("Proxy error for %s: %v", requestID, err)
 		http.Error(w, "Proxy error", http.StatusBadGateway)
 	}
 }
 
-// handleUnknownRoute handles requests that don't match any configured pattern
-func (s *ProxyServer) handleUnknownRoute(w http.ResponseWriter, r *http.Request) {
-	// Return 404 for unknown routes
-	http.Error(w, "custom 404 page", http.StatusNotFound)
-}
-
-// createRequestMetadata creates metadata for a request to avoid duplication
-func (s *ProxyServer) createRequestMetadata(r *http.Request, requestID string, route *Route) RequestMetadata {
-	proxyPath := r.URL.String()
-
-	return RequestMetadata{
-		ID:         requestID,
-		Method:     r.Method,
-		URL:        r.URL.String(),
-		RemoteAddr: r.RemoteAddr,
-		UserAgent:  r.UserAgent(),
-		ProxyPath:  proxyPath,
-		Route:      route,
-	}
-}
-
 // proxyWithDuplex handles the duplex streaming proxy logic with minimal latency
-func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, requestID string, route *Route) error {
-	metadata := s.createRequestMetadata(originalReq, requestID, route)
+func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, requestID string, logger Logger) error {
+	// Create request metadata inline
+	metadata := RequestMetadata{
+		ID:        requestID,
+		Pattern:   originalReq.Pattern,
+		Method:    originalReq.Method,
+		SourceURL: originalReq.URL.String(),
+		TargetURL: targetURL.String(),
+	}
 
 	// Split request body stream for logging
 	requestLogReader, requestLogWriter := io.Pipe()
 	teeReader := io.TeeReader(originalReq.Body, requestLogWriter)
-	proxyRequestBody := &streamDuplexer{
-		Reader:    teeReader,
-		original:  originalReq.Body,
-		logWriter: requestLogWriter,
-	}
-	go s.logger.LogRequest(metadata, requestLogReader, originalReq)
+	go logger.LogRequest(metadata, requestLogReader, originalReq)
 
 	// Create and execute the proxy request synchronously
-	proxyReq, err := http.NewRequest(originalReq.Method, targetURL.String(), proxyRequestBody)
+	proxyReq, err := http.NewRequest(originalReq.Method, targetURL.String(), teeReader)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy request: %w", err)
 	}
@@ -174,6 +125,7 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 	// Execute the proxy request synchronously
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
+	requestLogWriter.Close() // Close the request log writer after request is sent
 	if err != nil {
 		return fmt.Errorf("proxy request failed: %w", err)
 	}
@@ -189,24 +141,10 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 
 	// Split response stream for logging
 	responseLogReader, responseLogWriter := io.Pipe()
-	go s.logger.LogResponse(metadata, responseLogReader, resp)
+	go logger.LogResponse(metadata, responseLogReader, resp)
 	teeReader = io.TeeReader(resp.Body, responseLogWriter)
 	_, err = io.Copy(w, teeReader)
 	responseLogWriter.Close()
 
 	return err
-}
-
-// streamDuplexer wraps a TeeReader and handles proper cleanup for duplexed streams
-type streamDuplexer struct {
-	io.Reader
-	original  io.ReadCloser
-	logWriter *io.PipeWriter
-}
-
-func (s *streamDuplexer) Close() error {
-	// Close the log writer to signal end of stream to async logger
-	s.logWriter.Close()
-	// Close the original body
-	return s.original.Close()
 }
