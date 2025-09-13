@@ -355,19 +355,6 @@ func (s *ProxyServer) streamToLoggingServer(reader io.Reader, requestID, streamT
 				fmt.Fprintf(pipeWriter, "Host: %s\r\n", req.Host)
 			}
 
-			// Content-Length header - Go calculates this automatically
-			// It may not be in req.Header but is available via req.ContentLength
-			// Only add if not already in headers and we have a positive content length
-			if req.ContentLength > 0 && req.Header.Get("Content-Length") == "" {
-				fmt.Fprintf(pipeWriter, "Content-Length: %d\r\n", req.ContentLength)
-			}
-
-			// Transfer-Encoding header - Go handles this automatically
-			// Usually not in req.Header when it's "chunked"
-			if len(req.TransferEncoding) > 0 {
-				fmt.Fprintf(pipeWriter, "Transfer-Encoding: %s\r\n", strings.Join(req.TransferEncoding, ", "))
-			}
-
 			// Write other headers preserving original order but with updated values
 			for name, values := range req.Header {
 				// Skip headers we handle specially above
