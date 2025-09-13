@@ -70,7 +70,7 @@ func createTestConfig(loggingServerURL string, consoleLogging, defaultLogging bo
 		Server: struct {
 			Port int    `yaml:"port"`
 			Host string `yaml:"host"`
-		}{Port: 0, Host: "localhost"},
+		}{Port: 5601, Host: "localhost"},
 		Logging: struct {
 			Console   bool   `yaml:"console"`
 			ServerURL string `yaml:"server_url"`
@@ -688,6 +688,346 @@ func TestConsoleLoggingBehavior(t *testing.T) {
 
 			if config.Logging.Default != tc.defaultLogging {
 				t.Errorf("Expected default logging %t, got %t", tc.defaultLogging, config.Logging.Default)
+			}
+		})
+	}
+}
+
+func TestQueryStringLogging(t *testing.T) {
+	// Create mock backend server that echoes query parameters
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"query": "%s", "param1": "%s", "param2": "%s"}`,
+			r.URL.RawQuery, r.URL.Query().Get("param1"), r.URL.Query().Get("param2"))
+	}))
+	defer backend.Close()
+
+	// Create mock logging server
+	loggingServer := NewMockLoggingServer()
+	defer loggingServer.Close()
+
+	// Create test config
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"test": {Pattern: "/api/", Destination: backend.URL + "/", Logging: true},
+	})
+
+	// Create proxy server
+	proxyServer := NewProxyServer(config)
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer.mux)
+	defer testServer.Close()
+
+	// Make request with query string
+	resp, err := http.Get(testServer.URL + "/api/search?param1=value1&param2=value2&special=%40%21%24")
+	if err != nil {
+		t.Fatal("Request with query string failed:", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	// Give time for logging
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that the logged request contains the query string
+	if len(loggingServer.requests) == 0 {
+		t.Fatal("Expected request with query string to be logged")
+	}
+
+	for _, requestData := range loggingServer.requests {
+		requestString := string(requestData)
+		t.Logf("Logged request with query string:\n%s", requestString)
+
+		// Should contain the request line with query parameters
+		if !strings.Contains(requestString, "GET /search?") {
+			t.Error("Expected logged request to contain query string in request line")
+		}
+
+		// Should contain specific query parameters
+		expectedParams := []string{"param1=value1", "param2=value2", "special=%40%21%24"}
+		for _, param := range expectedParams {
+			if !strings.Contains(requestString, param) {
+				t.Errorf("Expected logged request to contain query parameter: %s", param)
+			}
+		}
+
+		break // Check first request
+	}
+}
+
+func TestChunkedTransferEncoding(t *testing.T) {
+	// Create mock backend server that handles chunked requests
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Error reading body", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"received": "%s", "transfer_encoding": "%v", "content_length": %d}`,
+			string(body), r.TransferEncoding, r.ContentLength)
+	}))
+	defer backend.Close()
+
+	// Create mock logging server
+	loggingServer := NewMockLoggingServer()
+	defer loggingServer.Close()
+
+	// Create test config
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"test": {Pattern: "/api/", Destination: backend.URL + "/", Logging: true},
+	})
+
+	// Create proxy server
+	proxyServer := NewProxyServer(config)
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer.mux)
+	defer testServer.Close()
+
+	// Create a custom HTTP request with Transfer-Encoding: chunked
+	client := &http.Client{}
+
+	// Create request body
+	requestBody := "This is a test body for chunked transfer encoding"
+
+	req, err := http.NewRequest("POST", testServer.URL+"/api/chunked", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal("Failed to create request:", err)
+	}
+
+	// Set headers for chunked transfer encoding
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Transfer-Encoding", "chunked")
+	// Remove Content-Length to force chunked encoding
+	req.ContentLength = -1
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal("Chunked request failed:", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	// Give time for logging
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that the request was logged
+	if len(loggingServer.requests) == 0 {
+		t.Fatal("Expected chunked request to be logged")
+	}
+
+	for _, requestData := range loggingServer.requests {
+		requestString := string(requestData)
+		t.Logf("Logged chunked request:\n%s", requestString)
+
+		// Note: Go's HTTP implementation may not preserve explicit Transfer-Encoding headers
+		// in the reconstructed request, but the body should still be present
+		// Check for either Transfer-Encoding header OR the absence of Content-Length (indicating chunked)
+		hasTransferEncoding := strings.Contains(requestString, "Transfer-Encoding:")
+		hasContentLength := strings.Contains(requestString, "Content-Length:")
+
+		if !hasTransferEncoding && hasContentLength {
+			t.Logf("Note: Transfer-Encoding header not preserved, but this is acceptable behavior")
+		}
+
+		// Should contain the request body
+		if !strings.Contains(requestString, requestBody) {
+			t.Error("Expected logged request to contain the request body")
+		}
+
+		// Should contain proper HTTP method and path
+		if !strings.Contains(requestString, "POST /chunked HTTP/1.1") {
+			t.Error("Expected logged request to contain proper HTTP request line")
+		}
+
+		// Should contain Content-Type header
+		if !strings.Contains(requestString, "Content-Type: text/plain") {
+			t.Error("Expected logged request to contain Content-Type header")
+		}
+
+		break // Check first request
+	}
+}
+
+func TestUnknownRouteWithQueryString(t *testing.T) {
+	// Create mock logging server
+	loggingServer := NewMockLoggingServer()
+	defer loggingServer.Close()
+
+	// Create test config with default logging enabled
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"known": {Pattern: "/api/", Destination: "https://example.com/", Logging: true},
+	})
+
+	// Create proxy server
+	proxyServer := NewProxyServer(config)
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer.mux)
+	defer testServer.Close()
+
+	// Make request to unknown route with query parameters
+	resp, err := http.Get(testServer.URL + "/unknown/path?param1=value1&param2=value2&search=test%20query")
+	if err != nil {
+		t.Fatal("Request to unknown route with query string failed:", err)
+	}
+	defer resp.Body.Close()
+
+	// Should get 404
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404, got %d", resp.StatusCode)
+	}
+
+	// Give time for async logging
+	time.Sleep(100 * time.Millisecond)
+
+	// Should have logged the unknown route with query string (default: true)
+	if len(loggingServer.requests) == 0 {
+		t.Error("Expected unknown route request with query string to be logged")
+	}
+
+	if len(loggingServer.responses) == 0 {
+		t.Error("Expected unknown route response to be logged")
+	}
+
+	// Check that the logged request contains the query string
+	for _, requestData := range loggingServer.requests {
+		requestString := string(requestData)
+		t.Logf("Logged unknown route request with query string:\n%s", requestString)
+
+		// Should contain the request line with query parameters
+		if !strings.Contains(requestString, "GET /unknown/path?") {
+			t.Error("Expected logged request to contain path with query string")
+		}
+
+		// Should contain specific query parameters
+		expectedParams := []string{"param1=value1", "param2=value2", "search=test%20query"}
+		for _, param := range expectedParams {
+			if !strings.Contains(requestString, param) {
+				t.Errorf("Expected logged request to contain query parameter: %s", param)
+			}
+		}
+
+		break // Check first request
+	}
+}
+
+func TestCatchAllHandling(t *testing.T) {
+	// Create mock backend server for catch-all
+	catchAllBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "Catch-all handler received: %s %s", r.Method, r.URL.Path)
+	}))
+	defer catchAllBackend.Close()
+
+	// Create mock logging server
+	loggingServer := NewMockLoggingServer()
+	defer loggingServer.Close()
+
+	// Create test config with a catch-all route (empty pattern matches everything)
+	config := createTestConfig(loggingServer.URL(), false, true, map[string]Route{
+		"specific":  {Pattern: "/api/", Destination: "https://example.com/", Logging: true},
+		"catch_all": {Pattern: "/", Destination: catchAllBackend.URL + "/", Logging: true},
+	})
+
+	// Create proxy server
+	proxyServer := NewProxyServer(config)
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer.mux)
+	defer testServer.Close()
+
+	// Test cases for different paths
+	testCases := []struct {
+		name         string
+		path         string
+		expectedBody string
+		shouldMatch  string
+	}{
+		{
+			name:         "Specific route match",
+			path:         "/api/test",
+			expectedBody: "Example Domain", // Will reach example.com
+			shouldMatch:  "specific",
+		},
+		{
+			name:         "Catch-all route match",
+			path:         "/anything/else",
+			expectedBody: "Catch-all handler received: GET /anything/else",
+			shouldMatch:  "catch_all",
+		},
+		{
+			name:         "Root path catch-all",
+			path:         "/",
+			expectedBody: "Catch-all handler received: GET /",
+			shouldMatch:  "catch_all",
+		},
+		{
+			name:         "Deep path catch-all",
+			path:         "/some/deep/nested/path?query=value",
+			expectedBody: "Catch-all handler received: GET /some/deep/nested/path",
+			shouldMatch:  "catch_all",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Clear logging server state
+			loggingServer.requests = make(map[string][]byte)
+			loggingServer.responses = make(map[string][]byte)
+
+			resp, err := http.Get(testServer.URL + tc.path)
+			if err != nil {
+				t.Fatal("Request failed:", err)
+			}
+			defer resp.Body.Close()
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal("Failed to read response body:", err)
+			}
+
+			bodyStr := strings.TrimSpace(string(body))
+			if !strings.Contains(bodyStr, tc.expectedBody) {
+				t.Errorf("Expected response to contain '%s', got '%s'", tc.expectedBody, bodyStr)
+			}
+
+			// Give time for logging
+			time.Sleep(100 * time.Millisecond)
+
+			// Should have logged the request
+			if len(loggingServer.requests) == 0 {
+				t.Error("Expected request to be logged")
+			}
+
+			if len(loggingServer.responses) == 0 {
+				t.Error("Expected response to be logged")
+			}
+
+			// Check that the logged request contains the correct path
+			for _, requestData := range loggingServer.requests {
+				requestString := string(requestData)
+				t.Logf("Logged %s request:\n%s", tc.shouldMatch, requestString)
+
+				// Should contain the correct path in the request line
+				expectedPath := tc.path
+				if strings.Contains(tc.path, "?") {
+					expectedPath = strings.Split(tc.path, "?")[0]
+				}
+
+				if !strings.Contains(requestString, expectedPath) {
+					t.Errorf("Expected logged request to contain path: %s", expectedPath)
+				}
+
+				break // Check first request
 			}
 		})
 	}

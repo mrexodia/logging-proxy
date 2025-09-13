@@ -237,13 +237,8 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 
 	// Copy headers from original request, updating Host header value
 	for key, values := range originalReq.Header {
-		if strings.ToLower(key) == "host" {
-			// Update Host header to point to destination
-			proxyReq.Header.Set(key, targetURL.Host)
-		} else {
-			for _, value := range values {
-				proxyReq.Header.Add(key, value)
-			}
+		for _, value := range values {
+			proxyReq.Header.Add(key, value)
 		}
 	}
 
@@ -258,24 +253,18 @@ func (s *ProxyServer) proxyWithDuplex(w http.ResponseWriter, originalReq *http.R
 			proxyPath += "?" + originalReq.URL.RawQuery
 		}
 
-		if originalReq.Body != nil {
-			// Create a pipe for logging the request body
-			logPipeReader, logPipeWriter := io.Pipe()
+		// Create a pipe for logging the request body
+		logPipeReader, logPipeWriter := io.Pipe()
 
-			// Start async logging
-			go s.streamToLoggingServer(logPipeReader, requestID, "request", proxyReq, proxyPath, nil)
+		// Start async logging
+		go s.streamToLoggingServer(logPipeReader, requestID, "request", proxyReq, proxyPath, nil)
 
-			// Use TeeReader to duplicate the stream
-			teeReader := io.TeeReader(originalReq.Body, logPipeWriter)
-			proxyReq.Body = &requestBodyCloser{
-				Reader:     teeReader,
-				original:   originalReq.Body,
-				pipeWriter: logPipeWriter,
-			}
-		} else {
-			// Log request without body
-			go s.streamToLoggingServer(nil, requestID, "request", proxyReq, proxyPath, nil)
-			proxyReq.Body = originalReq.Body
+		// Use TeeReader to duplicate the stream
+		teeReader := io.TeeReader(originalReq.Body, logPipeWriter)
+		proxyReq.Body = &requestBodyCloser{
+			Reader:     teeReader,
+			original:   originalReq.Body,
+			pipeWriter: logPipeWriter,
 		}
 	} else {
 		proxyReq.Body = originalReq.Body
