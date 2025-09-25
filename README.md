@@ -9,8 +9,7 @@ It was built to capture LLM traces for OpenRouter, without having to set up heav
 The package consists of three components components:
 
 1. **Proxy Package** (`server.go`): Routes requests and handles streaming
-2. **Logging Server** (`logging-server/`): Command line tool for logging data
-2. **Proxy Server** (`logging-proxy/`): Command line tool for the proxy
+2. **Logging Proxy Server** (`logging-proxy/`): Command line tool for the proxy that logs the requests
 
 ## Configuration
 
@@ -48,13 +47,7 @@ routes:
 
 ## Running the Application
 
-1. **Start the logging server** (in one terminal):
-   ```bash
-   go run ./logging-server
-   ```
-   The logging server will start on port 8080 and create a `logs/` directory.
-
-2. **Start the proxy server** (in another terminal):
+1. **Start the logging proxy server**:
    ```bash
    go run ./logging-proxy
    ```
