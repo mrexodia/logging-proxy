@@ -71,7 +71,13 @@ type readCloser struct {
 func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request, destinationURL url.URL, logger Logger) {
 	// Capture request data
 	requestTime := time.Now()
-	requestURI := request.RequestURI
+
+	// Construct the full source URL (incoming request)
+	scheme := "http"
+	if request.TLS != nil {
+		scheme = "https"
+	}
+	sourceURL := fmt.Sprintf("%s://%s%s", scheme, request.Host, request.URL.String())
 
 	// Construct the target URL
 	path := request.PathValue("path")
@@ -87,7 +93,7 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		ID:             uuid.New().String(),
 		Pattern:        request.Pattern,
 		Method:         request.Method,
-		SourceURL:      request.URL.String(),
+		SourceURL:      sourceURL,
 		DestinationURL: destinationURL.String(),
 	}
 
@@ -110,15 +116,10 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		// Reconstruct proxy request headers
 		var headerBuf bytes.Buffer
 
-		// Write request line
-		fmt.Fprintf(&headerBuf, "%s %s %s\r\n", request.Method, requestURI, request.Proto)
+		// Write request line with full destination URL
+		fmt.Fprintf(&headerBuf, "%s %s %s\r\n", request.Method, destinationURL.String(), request.Proto)
 
-		// Write Host header
-		if request.Host != "" {
-			fmt.Fprintf(&headerBuf, "Host: %s\r\n", request.Host)
-		}
-
-		// Write remaining headers
+		// Write remaining headers (skip Host header as URL is absolute)
 		for name, values := range request.Header {
 			for _, value := range values {
 				fmt.Fprintf(&headerBuf, "%s: %s\r\n", name, value)

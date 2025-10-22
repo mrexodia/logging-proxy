@@ -2,6 +2,7 @@ package loggingproxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -718,4 +719,209 @@ func TestExperimentHttpExamples(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLogger is a test logger that captures logged requests and responses
+type TestLogger struct {
+	requests  []capturedLog
+	responses []capturedLog
+}
+
+type capturedLog struct {
+	metadata  RequestMetadata
+	timestamp time.Time
+	content   string
+}
+
+func (l *TestLogger) LogRequest(metadata RequestMetadata, timestamp time.Time, rawRequestStream io.ReadCloser) {
+	defer rawRequestStream.Close()
+	content, _ := io.ReadAll(rawRequestStream)
+	l.requests = append(l.requests, capturedLog{
+		metadata:  metadata,
+		timestamp: timestamp,
+		content:   string(content),
+	})
+}
+
+func (l *TestLogger) LogResponse(metadata RequestMetadata, timestamp time.Time, rawResponseStream io.ReadCloser) {
+	defer rawResponseStream.Close()
+	content, _ := io.ReadAll(rawResponseStream)
+	l.responses = append(l.responses, capturedLog{
+		metadata:  metadata,
+		timestamp: timestamp,
+		content:   string(content),
+	})
+}
+
+func TestRequestLogFormat(t *testing.T) {
+	// Create mock HTTPS backend server
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"path": "%s", "method": "%s"}`, r.URL.Path, r.Method)
+	}))
+	defer backend.Close()
+
+	// Create test logger to capture logs
+	testLogger := &TestLogger{}
+
+	// Create proxy server with HTTPS backend and configure it to skip TLS verification for tests
+	proxyServer := NewProxyServer("")
+	// Use the test server's client which trusts the self-signed cert
+	proxyServer.client = backend.Client()
+
+	err := proxyServer.AddRoute("/api/v1/", backend.URL+"/", testLogger)
+	if err != nil {
+		t.Fatal("Failed to add route:", err)
+	}
+
+	// Create test server for proxy (this will be HTTP)
+	testServer := httptest.NewServer(proxyServer)
+	defer testServer.Close()
+
+	// Make a POST request to test
+	requestBody := `{"test": "data"}`
+	resp, err := http.Post(testServer.URL+"/api/v1/models", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal("Request failed:", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response to ensure it completes
+	io.ReadAll(resp.Body)
+
+	// Give async logging a moment to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify we captured the request log
+	if len(testLogger.requests) != 1 {
+		t.Fatalf("Expected 1 request log, got %d", len(testLogger.requests))
+	}
+
+	requestLog := testLogger.requests[0]
+
+	// Verify metadata source_url contains full incoming URL
+	expectedSourceURL := testServer.URL + "/api/v1/models"
+	if requestLog.metadata.SourceURL != expectedSourceURL {
+		t.Errorf("Expected source_url to be %s, got %s", expectedSourceURL, requestLog.metadata.SourceURL)
+	}
+
+	// Verify metadata target_url contains full destination URL
+	expectedDestURL := backend.URL + "/models"
+	if requestLog.metadata.DestinationURL != expectedDestURL {
+		t.Errorf("Expected target_url to be %s, got %s", expectedDestURL, requestLog.metadata.DestinationURL)
+	}
+
+	// Verify request line format: should have full destination URL, not relative path
+	expectedRequestLine := fmt.Sprintf("POST %s HTTP/1.1", backend.URL+"/models")
+	if !strings.HasPrefix(requestLog.content, expectedRequestLine) {
+		t.Errorf("Expected request line to start with %q, got:\n%s", expectedRequestLine, requestLog.content[:200])
+	}
+
+	// Verify NO Host header in the logged request (since we use absolute URL)
+	lines := strings.Split(requestLog.content, "\r\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Host:") {
+			t.Errorf("Expected no Host header in request log, but found: %s", line)
+		}
+	}
+
+	// Verify request body is present
+	if !strings.Contains(requestLog.content, requestBody) {
+		t.Errorf("Expected request body to contain %q", requestBody)
+	}
+
+	t.Logf("Request log format verified successfully")
+	t.Logf("Source URL: %s", requestLog.metadata.SourceURL)
+	t.Logf("Destination URL: %s", requestLog.metadata.DestinationURL)
+	t.Logf("Request line: %s", strings.Split(requestLog.content, "\r\n")[0])
+}
+
+func TestRealHTTPSEndpoint(t *testing.T) {
+	// This test verifies that the proxy can handle real HTTPS destinations
+	// Using OpenRouter's /api/v1/models endpoint which doesn't require authentication
+
+	// Create test logger to capture logs
+	testLogger := &TestLogger{}
+
+	// Create proxy server with real HTTPS destination
+	proxyServer := NewProxyServer("")
+	err := proxyServer.AddRoute("/api/v1/", "https://openrouter.ai/api/v1/", testLogger)
+	if err != nil {
+		t.Fatal("Failed to add route:", err)
+	}
+
+	// Create test server for proxy (this will be HTTP)
+	testServer := httptest.NewServer(proxyServer)
+	defer testServer.Close()
+
+	// Make a GET request to the models endpoint
+	resp, err := http.Get(testServer.URL + "/api/v1/models")
+	if err != nil {
+		t.Fatal("Request failed:", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal("Failed to read response:", err)
+	}
+
+	// Verify we got a successful response (not raw TLS handshake)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d. Body: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Verify the response is valid JSON (not raw TLS handshake data)
+	var jsonData map[string]interface{}
+	jsonErr := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&jsonData)
+	if jsonErr != nil {
+		t.Errorf("Expected valid JSON response, got error: %v. Body: %s", jsonErr, string(responseBody[:min(200, len(responseBody))]))
+	}
+
+	// Give async logging a moment to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify we captured the request log
+	if len(testLogger.requests) != 1 {
+		t.Fatalf("Expected 1 request log, got %d", len(testLogger.requests))
+	}
+
+	requestLog := testLogger.requests[0]
+
+	// Verify metadata URLs
+	expectedSourceURL := testServer.URL + "/api/v1/models"
+	if requestLog.metadata.SourceURL != expectedSourceURL {
+		t.Errorf("Expected source_url to be %s, got %s", expectedSourceURL, requestLog.metadata.SourceURL)
+	}
+
+	expectedDestURL := "https://openrouter.ai/api/v1/models"
+	if requestLog.metadata.DestinationURL != expectedDestURL {
+		t.Errorf("Expected target_url to be %s, got %s", expectedDestURL, requestLog.metadata.DestinationURL)
+	}
+
+	// Verify request line has full HTTPS URL
+	expectedRequestLine := "GET https://openrouter.ai/api/v1/models HTTP/1.1"
+	if !strings.HasPrefix(requestLog.content, expectedRequestLine) {
+		t.Errorf("Expected request line to start with %q, got:\n%s", expectedRequestLine, requestLog.content[:min(200, len(requestLog.content))])
+	}
+
+	// Verify NO Host header in the logged request
+	lines := strings.Split(requestLog.content, "\r\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Host:") {
+			t.Errorf("Expected no Host header in request log, but found: %s", line)
+		}
+	}
+
+	t.Logf("Successfully proxied HTTPS request to OpenRouter")
+	t.Logf("Response status: %d", resp.StatusCode)
+	t.Logf("Response is valid JSON: %v", jsonErr == nil)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
