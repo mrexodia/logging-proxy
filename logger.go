@@ -7,11 +7,13 @@ import (
 
 // RequestMetadata contains information about a request for logging
 type RequestMetadata struct {
-	ID             string `json:"id"`
-	Pattern        string `json:"pattern"`
-	Method         string `json:"method"`
-	SourceURL      string `json:"source_url"`
-	DestinationURL string `json:"target_url"`
+	ID                      string `json:"id"`
+	Pattern                 string `json:"pattern"`
+	Method                  string `json:"method"`
+	SourceURL               string `json:"source_url"`
+	DestinationURL          string `json:"target_url"`
+	RequestContentEncoding  string `json:"request_content_encoding,omitempty"`
+	ResponseContentEncoding string `json:"response_content_encoding,omitempty"`
 }
 
 // Logger interface for dependency injection of logging functionality

@@ -2,6 +2,7 @@ package loggingproxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -924,4 +925,270 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestGzipRequestLogging(t *testing.T) {
+	// Create mock backend that echoes what it receives
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "Received %d bytes with encoding: %s", len(body), r.Header.Get("Content-Encoding"))
+	}))
+	defer backend.Close()
+
+	// Create test logger to capture logs
+	testLogger := &TestLogger{}
+
+	// Create proxy server
+	proxyServer := NewProxyServer("")
+	err := proxyServer.AddRoute("/api/", backend.URL+"/", testLogger)
+	if err != nil {
+		t.Fatal("Failed to add route:", err)
+	}
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer)
+	defer testServer.Close()
+
+	// Create gzip-compressed request body
+	originalBody := `{"test": "data", "message": "this is a test of gzip compression"}`
+	var compressedBuf bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressedBuf)
+	gzipWriter.Write([]byte(originalBody))
+	gzipWriter.Close()
+
+	// Make request with gzip-compressed body
+	req, err := http.NewRequest("POST", testServer.URL+"/api/test", &compressedBuf)
+	if err != nil {
+		t.Fatal("Failed to create request:", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal("Request failed:", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response to ensure it completes
+	io.ReadAll(resp.Body)
+
+	// Give async logging a moment to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify we captured the request log
+	if len(testLogger.requests) != 1 {
+		t.Fatalf("Expected 1 request log, got %d", len(testLogger.requests))
+	}
+
+	requestLog := testLogger.requests[0]
+
+	// Verify metadata captured the encoding
+	if requestLog.metadata.RequestContentEncoding != "gzip" {
+		t.Errorf("Expected request_content_encoding to be 'gzip', got %q", requestLog.metadata.RequestContentEncoding)
+	}
+
+	// Verify the logged content does NOT contain Content-Encoding header
+	if strings.Contains(requestLog.content, "Content-Encoding:") {
+		t.Error("Expected Content-Encoding header to be removed from logged request")
+	}
+
+	// Verify the logged body is DECOMPRESSED (not compressed binary)
+	if !strings.Contains(requestLog.content, originalBody) {
+		t.Errorf("Expected logged request to contain decompressed body %q, got:\n%s", originalBody, requestLog.content)
+	}
+
+	t.Logf("Successfully logged gzip-compressed request with decompressed body")
+}
+
+func TestGzipResponseLogging(t *testing.T) {
+	// Create mock backend that returns gzip-compressed response
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseBody := `{"result": "success", "message": "this is a gzip-compressed response"}`
+
+		// Compress the response
+		var compressedBuf bytes.Buffer
+		gzipWriter := gzip.NewWriter(&compressedBuf)
+		gzipWriter.Write([]byte(responseBody))
+		gzipWriter.Close()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(compressedBuf.Bytes())
+	}))
+	defer backend.Close()
+
+	// Create test logger to capture logs
+	testLogger := &TestLogger{}
+
+	// Create proxy server
+	proxyServer := NewProxyServer("")
+	err := proxyServer.AddRoute("/api/", backend.URL+"/", testLogger)
+	if err != nil {
+		t.Fatal("Failed to add route:", err)
+	}
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer)
+	defer testServer.Close()
+
+	// Make request (Go's http client will auto-decompress gzip responses)
+	resp, err := http.Get(testServer.URL + "/api/test")
+	if err != nil {
+		t.Fatal("Request failed:", err)
+	}
+	defer resp.Body.Close()
+
+	// Note: Go's http.Client automatically handles gzip decompression and removes
+	// the Content-Encoding header from the response. This is correct HTTP behavior.
+	// The proxy correctly forwards the gzip response to the client, but the client's
+	// http library transparently decompresses it for us.
+
+	// Read response (will be auto-decompressed by http client)
+	clientBody, _ := io.ReadAll(resp.Body)
+
+	// Give async logging a moment to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify we captured the response log
+	if len(testLogger.responses) != 1 {
+		t.Fatalf("Expected 1 response log, got %d", len(testLogger.responses))
+	}
+
+	responseLog := testLogger.responses[0]
+
+	// Verify metadata captured the encoding
+	if responseLog.metadata.ResponseContentEncoding != "gzip" {
+		t.Errorf("Expected response_content_encoding to be 'gzip', got %q", responseLog.metadata.ResponseContentEncoding)
+	}
+
+	// Verify the logged content does NOT contain Content-Encoding header
+	if strings.Contains(responseLog.content, "Content-Encoding:") {
+		t.Error("Expected Content-Encoding header to be removed from logged response")
+	}
+
+	// Verify the logged body is DECOMPRESSED
+	expectedBody := `{"result": "success", "message": "this is a gzip-compressed response"}`
+	if !strings.Contains(responseLog.content, expectedBody) {
+		t.Errorf("Expected logged response to contain decompressed body %q, got:\n%s", expectedBody, responseLog.content)
+	}
+
+	// Verify client received the data correctly
+	if !strings.Contains(string(clientBody), expectedBody) {
+		t.Errorf("Expected client to receive %q, got %s", expectedBody, string(clientBody))
+	}
+
+	t.Logf("Successfully logged gzip-compressed response with decompressed body")
+	t.Logf("Client correctly received compressed data")
+}
+
+func TestCompressionPassthrough(t *testing.T) {
+	// This test verifies that the actual traffic between client and destination
+	// remains compressed, even though logs are decompressed
+
+	backendReceivedCompressed := false
+	backendReceivedEncoding := ""
+
+	// Create mock backend that checks if it receives compressed data
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendReceivedEncoding = r.Header.Get("Content-Encoding")
+
+		// Try to read as gzip - if successful, it was compressed
+		if backendReceivedEncoding == "gzip" {
+			_, err := gzip.NewReader(r.Body)
+			backendReceivedCompressed = (err == nil)
+		}
+
+		// Consume the body
+		io.ReadAll(r.Body)
+
+		// Send gzip-compressed response
+		responseBody := `{"status": "ok"}`
+		var compressedBuf bytes.Buffer
+		gzipWriter := gzip.NewWriter(&compressedBuf)
+		gzipWriter.Write([]byte(responseBody))
+		gzipWriter.Close()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(compressedBuf.Bytes())
+	}))
+	defer backend.Close()
+
+	// Create test logger
+	testLogger := &TestLogger{}
+
+	// Create proxy server
+	proxyServer := NewProxyServer("")
+	err := proxyServer.AddRoute("/api/", backend.URL+"/", testLogger)
+	if err != nil {
+		t.Fatal("Failed to add route:", err)
+	}
+
+	// Create test server for proxy
+	testServer := httptest.NewServer(proxyServer)
+	defer testServer.Close()
+
+	// Create gzip-compressed request
+	requestBody := `{"test": "compression passthrough"}`
+	var compressedBuf bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressedBuf)
+	gzipWriter.Write([]byte(requestBody))
+	gzipWriter.Close()
+
+	// Make request with gzip compression
+	req, err := http.NewRequest("POST", testServer.URL+"/api/test", &compressedBuf)
+	if err != nil {
+		t.Fatal("Failed to create request:", err)
+	}
+	req.Header.Set("Content-Encoding", "gzip")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal("Request failed:", err)
+	}
+	defer resp.Body.Close()
+
+	// Verify backend received compressed data
+	if !backendReceivedCompressed {
+		t.Error("Expected backend to receive gzip-compressed data, but it was not compressed")
+	}
+
+	if backendReceivedEncoding != "gzip" {
+		t.Errorf("Expected backend to receive Content-Encoding: gzip, got %q", backendReceivedEncoding)
+	}
+
+	// Note: Go's http.Client automatically handles gzip decompression for responses
+	// The proxy forwards the compressed response correctly, but the client library
+	// transparently decompresses it.
+
+	// Read response (auto-decompressed by http client)
+	responseData, _ := io.ReadAll(resp.Body)
+	expectedResponse := `{"status": "ok"}`
+	if !strings.Contains(string(responseData), expectedResponse) {
+		t.Errorf("Expected response %q, got %s", expectedResponse, string(responseData))
+	}
+
+	// Give async logging time to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify logs contain decompressed data
+	if len(testLogger.requests) != 1 {
+		t.Fatalf("Expected 1 request log, got %d", len(testLogger.requests))
+	}
+
+	if !strings.Contains(testLogger.requests[0].content, requestBody) {
+		t.Error("Expected logged request to contain decompressed body")
+	}
+
+	if !strings.Contains(testLogger.responses[0].content, expectedResponse) {
+		t.Error("Expected logged response to contain decompressed body")
+	}
+
+	t.Logf("Successfully verified compression passthrough")
+	t.Logf("Backend received compressed data: %v", backendReceivedCompressed)
+	t.Logf("Logs contain decompressed data")
 }

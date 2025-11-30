@@ -2,6 +2,8 @@ package loggingproxy
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
 )
 
@@ -68,6 +71,63 @@ type readCloser struct {
 	io.Closer
 }
 
+// decompressReader returns a reader that decompresses the input based on the Content-Encoding.
+// If encoding is empty or unknown, it returns the original reader.
+// Supports: gzip, deflate, br (brotli), compress, identity
+func decompressReader(r io.Reader, encoding string) (io.ReadCloser, error) {
+	// Normalize encoding (trim spaces, lowercase)
+	encoding = strings.TrimSpace(strings.ToLower(encoding))
+
+	// Handle empty or identity encoding (no compression)
+	if encoding == "" || encoding == "identity" {
+		return io.NopCloser(r), nil
+	}
+
+	// Handle multiple encodings (applied in order, so decompress in reverse)
+	if strings.Contains(encoding, ",") {
+		encodings := strings.Split(encoding, ",")
+		// Decompress in reverse order (last encoding first)
+		var err error
+		currentReader := r
+		for i := len(encodings) - 1; i >= 0; i-- {
+			enc := strings.TrimSpace(encodings[i])
+			var rc io.ReadCloser
+			rc, err = decompressReader(currentReader, enc)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decompress encoding %q: %w", enc, err)
+			}
+			currentReader = rc
+		}
+		return io.NopCloser(currentReader), nil
+	}
+
+	// Single encoding
+	switch encoding {
+	case "gzip", "x-gzip":
+		gr, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		return gr, nil
+
+	case "deflate":
+		// deflate is flate without the zlib wrapper
+		return flate.NewReader(r), nil
+
+	case "br":
+		// Brotli compression
+		return io.NopCloser(brotli.NewReader(r)), nil
+
+	case "compress", "x-compress":
+		// LZW compression (uncommon, not implementing for now)
+		return nil, fmt.Errorf("compress/LZW encoding not supported")
+
+	default:
+		// Unknown encoding, return as-is
+		return nil, fmt.Errorf("unknown encoding: %s", encoding)
+	}
+}
+
 func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request, destinationURL url.URL, logger Logger) {
 	// Capture request data
 	requestTime := time.Now()
@@ -88,13 +148,17 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		destinationURL.RawQuery = request.URL.RawQuery
 	}
 
+	// Capture request Content-Encoding before modifying the request
+	requestContentEncoding := request.Header.Get("Content-Encoding")
+
 	// Create request metadata
 	metadata := RequestMetadata{
-		ID:             uuid.New().String(),
-		Pattern:        request.Pattern,
-		Method:         request.Method,
-		SourceURL:      sourceURL,
-		DestinationURL: destinationURL.String(),
+		ID:                     uuid.New().String(),
+		Pattern:                request.Pattern,
+		Method:                 request.Method,
+		SourceURL:              sourceURL,
+		DestinationURL:         destinationURL.String(),
+		RequestContentEncoding: requestContentEncoding,
 	}
 
 	// Split request body stream for logging
@@ -113,14 +177,20 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 
 	// Async request logging with header reconstruction (log the outgoing proxy request)
 	go func() {
+		defer requestLogReader.Close()
+
 		// Reconstruct proxy request headers
 		var headerBuf bytes.Buffer
 
 		// Write request line with full destination URL
 		fmt.Fprintf(&headerBuf, "%s %s %s\r\n", request.Method, destinationURL.String(), request.Proto)
 
-		// Write remaining headers (skip Host header as URL is absolute)
+		// Write remaining headers (skip Host and Content-Encoding headers)
 		for name, values := range request.Header {
+			// Skip Host header (URL is absolute) and Content-Encoding (we're logging decompressed)
+			if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Encoding") {
+				continue
+			}
 			for _, value := range values {
 				fmt.Fprintf(&headerBuf, "%s: %s\r\n", name, value)
 			}
@@ -129,10 +199,23 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		// Write separator between headers and body
 		headerBuf.WriteString("\r\n")
 
-		// Combine headers + body from pipe
+		// Decompress the request body if needed
+		var bodyReader io.Reader = requestLogReader
+		if requestContentEncoding != "" {
+			decompressed, err := decompressReader(requestLogReader, requestContentEncoding)
+			if err != nil {
+				// If decompression fails, log the compressed data as-is
+				fmt.Fprintf(&headerBuf, "X-Decompression-Error: %v\r\n", err)
+			} else {
+				defer decompressed.Close()
+				bodyReader = decompressed
+			}
+		}
+
+		// Combine headers + body
 		logger.LogRequest(metadata, requestTime, &readCloser{
-			Reader: io.MultiReader(&headerBuf, requestLogReader),
-			Closer: requestLogReader,
+			Reader: io.MultiReader(&headerBuf, bodyReader),
+			Closer: io.NopCloser(nil), // The pipe closer is already deferred
 		})
 	}()
 
@@ -149,8 +232,12 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 	}
 	defer response.Body.Close()
 
-	// Capture response timestamp
+	// Capture response timestamp and Content-Encoding
 	responseTime := time.Now()
+	responseContentEncoding := response.Header.Get("Content-Encoding")
+
+	// Update metadata with response encoding
+	metadata.ResponseContentEncoding = responseContentEncoding
 
 	// Send response headers as quickly as possible
 	for key, values := range response.Header {
@@ -167,14 +254,19 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 
 	// Async response logging with header reconstruction
 	go func() {
+		defer responseLogReader.Close()
+
 		// Reconstruct response headers
 		var headerBuf bytes.Buffer
 
 		// Write response status line
 		fmt.Fprintf(&headerBuf, "%s %s\r\n", response.Proto, response.Status)
 
-		// Write all response headers (no filtering)
+		// Write response headers (skip Content-Encoding as we're logging decompressed)
 		for name, values := range response.Header {
+			if strings.EqualFold(name, "Content-Encoding") {
+				continue
+			}
 			for _, value := range values {
 				fmt.Fprintf(&headerBuf, "%s: %s\r\n", name, value)
 			}
@@ -183,10 +275,23 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		// Write separator between headers and body
 		headerBuf.WriteString("\r\n")
 
-		// Combine headers + body from pipe
+		// Decompress the response body if needed
+		var bodyReader io.Reader = responseLogReader
+		if responseContentEncoding != "" {
+			decompressed, err := decompressReader(responseLogReader, responseContentEncoding)
+			if err != nil {
+				// If decompression fails, log the compressed data as-is
+				fmt.Fprintf(&headerBuf, "X-Decompression-Error: %v\r\n", err)
+			} else {
+				defer decompressed.Close()
+				bodyReader = decompressed
+			}
+		}
+
+		// Combine headers + body
 		logger.LogResponse(metadata, responseTime, &readCloser{
-			Reader: io.MultiReader(&headerBuf, responseLogReader),
-			Closer: responseLogReader,
+			Reader: io.MultiReader(&headerBuf, bodyReader),
+			Closer: io.NopCloser(nil), // The pipe closer is already deferred
 		})
 	}()
 
