@@ -59,6 +59,13 @@ func (s *ProxyServer) AddRoute(pattern string, destination string, logger Logger
 		return fmt.Errorf("failed to parse destination URL %q: %v", destination, err)
 	}
 
+	// Go URLs support relative paths, but passing them to the http.Client after
+	// JoinPath will result in an invalid HTTP request.
+	// Issue: https://github.com/golang/go/issues/76635
+	if destinationURL.Path == "" {
+		destinationURL.Path = "/"
+	}
+
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		s.handleRequest(w, r, *destinationURL, logger)
 	})
