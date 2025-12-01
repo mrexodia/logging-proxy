@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	loggingproxy "github.com/mrexodia/logging-proxy"
 	"gopkg.in/yaml.v3"
@@ -36,7 +37,12 @@ type Config struct {
 }
 
 func main() {
-	config, err := loadConfig("config.yaml")
+	// Allow passing the config file as the first argument
+	configFile := "config.yaml"
+	if len(os.Args) > 1 {
+		configFile = os.Args[1]
+	}
+	config, err := loadConfig(configFile)
 	if err != nil {
 		log.Fatal("Error loading config:", err)
 	}
@@ -62,6 +68,9 @@ func main() {
 	hasCatchAll := false
 	for _, route := range config.Routes {
 		fmt.Printf("[route] %s -> %s\n", route.Pattern, route.Destination)
+		if !strings.HasSuffix(route.Pattern, "/") {
+			fmt.Printf("  (warning) Pattern %q has no trailing '/'; will not match subpaths\n", route.Pattern)
+		}
 		if err := proxy.AddRoute(route.Pattern, route.Destination, logger); err != nil {
 			log.Fatalf("Failed to add route %s: %v", route.Pattern, err)
 		}

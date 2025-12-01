@@ -4,7 +4,7 @@ server:
   not_found: "/404/"
 
 logging:
-  console: true           # Enable simple console output
+  console: true          # Enable simple console output
   file: true             # Enable file-based logging
   log_dir: "logs"        # Directory to store log files
 
