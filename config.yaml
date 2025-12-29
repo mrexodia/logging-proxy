@@ -4,14 +4,18 @@ server:
   not_found: "/404/"
 
 logging:
-  console: true          # Enable simple console output
-  file: true             # Enable file-based logging
+  enabled: true          # Enable logging for all routes
+  console: true          # Enable simple console output (for debugging)
   log_dir: "logs"        # Directory to store log files
 
 routes:
   openrouter:
-    pattern: "/api/v1/"
+    pattern: "/openrouter/"
     destination: "https://openrouter.ai/api/v1/"
+  openrouter_models:
+    pattern: "/openrouter/models/"
+    destination: "https://openrouter.ai/api/v1/models/"
+    logging: false # Disable logging for this specific route
   lmstudio:
     pattern: "/lmstudio/"
     destination: "http://127.0.0.1:1234/"

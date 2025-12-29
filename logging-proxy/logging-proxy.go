@@ -20,6 +20,7 @@ import (
 type Route struct {
 	Pattern     string `yaml:"pattern"`
 	Destination string `yaml:"destination"`
+	Logging     *bool  `yaml:"logging"`
 }
 
 type Config struct {
@@ -29,8 +30,8 @@ type Config struct {
 		NotFound string `yaml:"not_found"`
 	} `yaml:"server"`
 	Logging struct {
+		Enabled bool   `yaml:"enabled"`
 		Console bool   `yaml:"console"`
-		File    bool   `yaml:"file"`
 		LogDir  string `yaml:"log_dir"`
 	} `yaml:"logging"`
 	Routes map[string]Route `yaml:"routes"`
@@ -50,27 +51,41 @@ func main() {
 	proxy := loggingproxy.NewProxyServer(config.Server.NotFound)
 
 	// Configure logger
-	var logger loggingproxy.Logger = &loggingproxy.NoOpLogger{}
-	if config.Logging.File {
-		logDir := config.Logging.LogDir
-		if logDir == "" {
-			logDir = "logs"
-		}
-		if fileLogger, err := loggingproxy.NewFileLogger(logDir); err != nil {
-			log.Printf("Failed to create file logger: %v, using no-op logger", err)
-		} else {
-			logger = fileLogger
-		}
-		fmt.Printf("Logging: file logging to %s\n", logDir)
+	var noOpLogger loggingproxy.NoOpLogger = loggingproxy.NoOpLogger{}
+	logDir := config.Logging.LogDir
+	if logDir == "" {
+		logDir = "logs"
+	}
+	fileLogger, err := loggingproxy.NewFileLogger(logDir, config.Logging.Console)
+	if err != nil {
+		log.Fatalf("Failed to create file logger: %v", err)
+	}
+
+	if config.Logging.Enabled {
+		log.Printf("Logging requests/responses to: %s", logDir)
 	}
 
 	// Add routes
 	hasCatchAll := false
 	for _, route := range config.Routes {
-		fmt.Printf("[route] %s -> %s\n", route.Pattern, route.Destination)
-		if !strings.HasSuffix(route.Pattern, "/") {
-			fmt.Printf("  (warning) Pattern %q has no trailing '/'; will not match subpaths\n", route.Pattern)
+		loggingEnabled := config.Logging.Enabled
+		if route.Logging != nil {
+			loggingEnabled = *route.Logging
 		}
+
+		var logger loggingproxy.Logger = nil
+		if loggingEnabled {
+			logger = fileLogger
+			log.Printf("[route] %s -> %s (logging enabled)", route.Pattern, route.Destination)
+		} else {
+			logger = &noOpLogger
+			log.Printf("[route] %s -> %s (logging disabled)", route.Pattern, route.Destination)
+		}
+
+		if !strings.HasSuffix(route.Pattern, "/") {
+			log.Printf("  (warning) Pattern %q has no trailing '/'; will not match subpaths", route.Pattern)
+		}
+
 		if err := proxy.AddRoute(route.Pattern, route.Destination, logger); err != nil {
 			log.Fatalf("Failed to add route %s: %v", route.Pattern, err)
 		}
@@ -82,14 +97,18 @@ func main() {
 	// Set up catch-all handler if no "/" route was configured
 	if !hasCatchAll && config.Server.NotFound != "" {
 		notFoundUrl := fmt.Sprintf("http://%s:%d%s", config.Server.Host, config.Server.Port, config.Server.NotFound)
-		fmt.Printf("Registering catch-all handler: %s\n", notFoundUrl)
+		log.Printf("Registering catch-all handler: %s", notFoundUrl)
+		var logger loggingproxy.Logger = &noOpLogger
+		if config.Logging.Enabled {
+			logger = fileLogger
+		}
 		if err := proxy.AddRoute("/", notFoundUrl, logger); err != nil {
 			log.Fatalf("Failed to add catch-all route: %v", err)
 		}
 	}
 
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
-	fmt.Printf("Proxy server starting on %s\n", addr)
+	log.Printf("Proxy server starting on %s", addr)
 
 	// Start proxy server
 	server := http.Server{

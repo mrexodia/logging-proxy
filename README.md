@@ -170,3 +170,10 @@ When `logging.console` is enabled, you'll see real-time request monitoring:
 - Web-based logging UI with live request feed
 - WebSocket support for real-time monitoring
 - Custom Transport implementation for simplified logging
+
+## Build for Linux
+
+```bash
+cd logging-proxy
+GOOS=linux GOARCH=amd64 go build .
+```

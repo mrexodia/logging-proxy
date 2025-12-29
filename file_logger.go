@@ -12,18 +12,20 @@ import (
 
 // FileLogger implements the Logger interface and writes logs to files
 type FileLogger struct {
-	LogDir string
+	LogDir  string
+	Console bool
 }
 
 // NewFileLogger creates a new file-based logger
-func NewFileLogger(logDir string) (*FileLogger, error) {
+func NewFileLogger(logDir string, console bool) (*FileLogger, error) {
 	// Ensure log directory exists
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	return &FileLogger{
-		LogDir: logDir,
+		LogDir:  logDir,
+		Console: console,
 	}, nil
 }
 
@@ -55,7 +57,7 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	// Create the log file
 	logFile, err := os.Create(filePath)
 	if err != nil {
-		fmt.Printf("Failed to create log file %s: %v\n", filePath, err)
+		log.Printf("[error] Failed to create log file %s: %v\n", filePath, err)
 		return
 	}
 	defer logFile.Close()
@@ -63,7 +65,7 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	// Write raw HTTP stream (headers + body already combined)
 	bytesWritten, err := io.Copy(logFile, rawStream)
 	if err != nil {
-		fmt.Printf("Failed to write raw HTTP stream: %v\n", err)
+		log.Printf("[error] Failed to write raw HTTP stream: %v\n", err)
 		return
 	}
 
@@ -80,7 +82,7 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 
 	metadataFile, err := os.Create(metadataPath)
 	if err != nil {
-		fmt.Printf("Failed to create metadata file %s: %v\n", metadataPath, err)
+		log.Printf("[error] Failed to create metadata file %s: %v\n", metadataPath, err)
 		return
 	}
 	defer metadataFile.Close()
@@ -89,9 +91,12 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	encoder.SetIndent("", "  ")
 	err = encoder.Encode(logMetadata)
 	if err != nil {
-		fmt.Printf("Failed to write metadata file %s: %v\n", metadataPath, err)
+		log.Printf("[error] Failed to write metadata file %s: %v\n", metadataPath, err)
 		return
 	}
 
-	log.Printf("Saved %s %s (%d bytes) -> %s", streamType, metadata.ID[:8], bytesWritten, filename)
+	if f.Console {
+		log.Printf("[%s] %s: %s %s -> %s", streamType, metadata.ID[:8], metadata.Method, metadata.SourceURL, metadata.DestinationURL)
+		log.Printf("[%s] %s: %d bytes saved to %s", streamType, metadata.ID[:8], bytesWritten, filename)
+	}
 }
