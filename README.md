@@ -1,19 +1,19 @@
 # Logging Proxy
 
-High performance HTTP reverse proxy server. Built in Go, this proxy allows you to route API requests to multiple destinations while capturing full request/response data for analysis and debugging.
+HTTP proxy tooling for capturing full request/response traffic.
 
-It was built to capture LLM traces for OpenRouter, without having to set up heavy enterprise routers like [LiteLLM](https://github.com/BerriAI/litellm).
+The binary can run two listeners at the same time:
 
-## Architecture
+1. **Reverse proxy** from `server:` + `routes:`
+2. **Optional forward proxy** from `proxy:` for `HTTP_PROXY` / `HTTPS_PROXY`
 
-The package consists of three components components:
+If `proxy:` is omitted, only the reverse proxy is started.
 
-1. **Proxy Package** (`server.go`): Routes requests and handles streaming
-2. **Logging Proxy Server** (`logging-proxy/`): Command line tool for the proxy that logs the requests
+## Reverse proxy
 
-## Configuration
+The reverse proxy listens on `server.host:server.port` and routes requests using `routes`.
 
-Edit `config.yaml` to configure the proxy:
+Example:
 
 ```yaml
 server:
@@ -22,9 +22,9 @@ server:
   not_found: "/404/"
 
 logging:
-  enabled: true          # Enable logging for all routes
-  console: true          # Enable simple console output (for debugging)
-  log_dir: "logs"        # Directory to store log files
+  enabled: true
+  console: true
+  log_dir: "logs"
 
 routes:
   # OPENAI_BASE_URL=http://localhost:5601/openrouter
@@ -34,7 +34,7 @@ routes:
   openrouter_models:
     pattern: "/openrouter/models/"
     destination: "https://openrouter.ai/api/v1/models/"
-    logging: false # Disable logging for this specific route
+    logging: false
   # OPENAI_BASE_URL=http://localhost:5601/lmstudio
   lmstudio:
     pattern: "/lmstudio/"
@@ -49,144 +49,77 @@ routes:
     destination: "http://127.0.0.1:8080/v1/"
 ```
 
-### Configuration Options
+## Forward proxy
 
-- **server.port**: Port for the proxy server (default: 5601)
-- **server.host**: Host interface to bind to (default: localhost)
-- **logging.console**: Enable/disable console request monitoring
-- **logging.server_url**: URL of the logging server
-- **logging.default**: Log unknown routes and 404 responses
-- **routes**: Map of route configurations with pattern/destination mappings
+If `proxy:` is present, the same binary also starts a forward proxy listener.
 
-## Running the Application
+Example:
 
-1. **Start the logging proxy server**:
-   ```bash
-   go run ./logging-proxy
-   ```
-   The proxy will start on the configured port (default: `5601`).
+```yaml
+proxy:
+  port: 8080
+  host: "127.0.0.1"
+  verbose: false
+  mitm:
+    enabled: true
+    cert_file: "certs/mitm-ca-cert.pem"
+    key_file: "certs/mitm-ca-key.pem"
+    common_name: "logging-proxy MITM CA"
+    organization: "logging-proxy"
+```
+
+Forward proxy behavior:
+- Plain HTTP requests are logged directly
+- HTTPS without MITM is tunneled with CONNECT, so bodies are encrypted
+- HTTPS with MITM decrypts and logs request/response bodies
+
+If the MITM CA files do not exist, they are generated automatically.
+
+## Running
+
+```bash
+go run ./logging-proxy
+```
+
+With `proxy:` present, both listeners start.
+
+## Claude Code setup
+
+For HTTPS body capture, enable `proxy.mitm.enabled` and trust the generated CA:
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:8080
+export HTTPS_PROXY=http://127.0.0.1:8080
+export NODE_EXTRA_CA_CERTS=/absolute/path/to/certs/mitm-ca-cert.pem
+```
+
+Without MITM, HTTPS bodies are not visible.
+
+## Logging
+
+Logs are written to `logging.log_dir`.
+
+Captured files:
+- `*_request.bin`
+- `*_response.bin`
+- `*_request_metadata.json`
+- `*_response_metadata.json`
+
+For MITM HTTPS requests, the `.bin` files contain decrypted HTTP headers and bodies.
+
+## Reverse proxy route matching
+
+Routes use Go `http.ServeMux` patterns.
+
+Examples:
+- `/lmstudio/` matches everything below `/lmstudio/`
+- `/exact` matches only `/exact`
+- `/` is a catch-all
+
+Go `http.ServeMux` supports wildcards, but this proxy currently rejects named wildcards in configured route patterns (for example `{id}` and `{path...}`). The special `{$}` end-anchor is still allowed.
 
 ## Testing
 
-### Running Unit Tests
-
 ```bash
-go test -v .
-```
-
-### Manual Testing with test.http
-
-The project includes `test.http` with example requests for manual testing using [VS Code REST Client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client).
-
-**Example test scenarios:**
-
-1. **Direct LM Studio Request** (for comparison):
-   ```http
-   POST http://127.0.0.1:1234/v1/chat/completions
-   Content-Type: application/json
-   Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   
-   {
-     "model": "liquid/lfm2-1.2b",
-     "messages": [{"role": "user", "content": "Test message"}]
-   }
-   ```
-
-2. **Proxied Request**:
-   ```http
-   POST http://127.0.0.1:5601/lmstudio/v1/chat/completions
-   Content-Type: application/json
-   Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   
-   {
-     "model": "liquid/lfm2-1.2b",
-     "messages": [{"role": "user", "content": "Test message"}]
-   }
-   ```
-
-3. **Streaming Request**:
-   ```http
-   POST http://127.0.0.1:5601/lmstudio/v1/chat/completions
-   Content-Type: application/json
-   
-   {
-     "model": "liquid/lfm2-1.2b",
-     "messages": [{"role": "user", "content": "Test message"}],
-     "stream": true
-   }
-   ```
-
-### Testing with LM Studio
-
-1. **Setup LM Studio**:
-   - Install and start LM Studio
-   - Load a model (e.g., "liquid/lfm2-1.2b")
-   - Enable the local server on `http://127.0.0.1:1234`
-
-2. **Test the proxy**:
-   - Start both logging server and proxy
-   - Use the provided `test.http` requests
-   - Compare direct vs. proxied responses
-   - Check the `logs/` directory for captured traffic
-
-## How It Works
-
-### Request Flow
-
-1. **Client** sends request to proxy (e.g., `localhost:5601/lmstudio/v1/chat/completions`)
-2. **Proxy** matches the route (`/lmstudio/` → `http://127.0.0.1:1234/`)
-3. **Path transformation** converts `/lmstudio/v1/chat/completions` → `/v1/chat/completions`
-4. **Duplex streaming** forwards request to destination while logging (if enabled)
-5. **Response streaming** returns data to client while logging response
-6. **Logging server** stores complete HTTP request/response data with metadata
-
-### Route Matching
-
-Routes use Go's [http.ServeMux](https://pkg.go.dev/net/http#hdr-Patterns-ServeMux) pattern matching:
-
-**Pattern Types:**
-- `/lmstudio/` - Matches `/lmstudio/` and all subpaths
-- `GET /lmstudio/file.txt` - Matches exactly `/lmstudio/file.txt`, no subpaths, just the `GET` method
-- `GET example.com/test/{$}` - Matches `Host: example.com`, path `/test` and `/test/`, but not `/test/foo`
-- `POST example.com/test/` - Matches `Host: example.com` and anything under `/test/`
-- `"/"` - Catch-all that matches everything
-
-**Note**: Wildcards (except `{$}`) are **not** supported and will be rejected on startup.
-
-**Example:**
-- Request: `/lmstudio/v1/chat/completions`
-- Pattern: `/lmstudio/` → `http://127.0.0.1:1234/`
-- Result: `http://127.0.0.1:1234/v1/chat/completions`
-
-In general, more specific patterns win when multiple patterns could match. If you create identical patterns the proxy will panic on startup.
-
-### Logging Format
-
-Captured logs include:
-- **Binary files**: Complete HTTP request/response data
-- **Metadata JSON**: Request ID, timestamps, headers, processing time
-- **X-Proxy-Path header**: Original proxy URL for replay capability
-
-Log files are named: `{timestamp}_{requestID}_{request|response}.bin`
-
-## Console Output
-
-When `logging.console` is enabled, you'll see real-time request monitoring:
-
-```
-2025-09-13 02:11:09 [092d0424] POST /lmstudio/v1/chat/completions -> http://127.0.0.1:1234/v1/chat/completions [log]
-```
-
-## Future Enhancements
-
-- Metadata endpoint for querying logged requests
-- Web-based logging UI with live request feed
-- WebSocket support for real-time monitoring
-- Custom Transport implementation for simplified logging
-
-## Build for Linux
-
-```bash
-cd logging-proxy
-GOOS=linux GOARCH=amd64 go build .
+go test ./...
 ```

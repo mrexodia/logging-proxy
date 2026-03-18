@@ -33,7 +33,7 @@ func NewProxyServer(notFoundEndpoint string) *ProxyServer {
 	}
 	return &ProxyServer{
 		mux:    mux,
-		client: &http.Client{},
+		client: newDirectHTTPClient(),
 	}
 }
 
