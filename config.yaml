@@ -18,7 +18,7 @@ routes:
     logging: false # Disable logging for this specific route
   lmstudio:
     pattern: "/lmstudio/"
-    destination: "http://127.0.0.1:1234/"
+    destination: "http://127.0.0.1:1234/v1/"
   # ANTHROPIC_BASE_URL=http://localhost:5601/anthropic
   anthropic:
     pattern: "/anthropic/"
