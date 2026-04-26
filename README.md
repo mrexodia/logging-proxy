@@ -22,18 +22,31 @@ server:
   not_found: "/404/"
 
 logging:
-  console: true           # Enable console output for request monitoring
-  server_url: "http://localhost:8080"  # Logging server URL
-  default: true           # Default logging behavior for routes and unknown requests
+  enabled: true          # Enable logging for all routes
+  console: true          # Enable simple console output (for debugging)
+  log_dir: "logs"        # Directory to store log files
 
 routes:
+  # OPENAI_BASE_URL=http://localhost:5601/openrouter
   openrouter:
-    pattern: "/api/v1/"
-    destination: "https://openrouter.ai/"
+    pattern: "/openrouter/"
+    destination: "https://openrouter.ai/api/v1/"
+  openrouter_models:
+    pattern: "/openrouter/models/"
+    destination: "https://openrouter.ai/api/v1/models/"
+    logging: false # Disable logging for this specific route
+  # OPENAI_BASE_URL=http://localhost:5601/lmstudio
   lmstudio:
     pattern: "/lmstudio/"
-    destination: "http://127.0.0.1:1234/"
-    logging: false        # Disable logging for this route
+    destination: "http://127.0.0.1:1234/v1/"
+  # ANTHROPIC_BASE_URL=http://localhost:5601/anthropic
+  anthropic:
+    pattern: "/anthropic/"
+    destination: "https://api.anthropic.com/"
+  # OPENAI_BASE_URL=http://localhost:5601/llama.cpp
+  llama.cpp:
+    pattern: "/llama.cpp/"
+    destination: "http://127.0.0.1:8080/v1/"
 ```
 
 ### Configuration Options
