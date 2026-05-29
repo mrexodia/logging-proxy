@@ -7,6 +7,8 @@ The binary can run two listeners at the same time:
 1. **Reverse proxy** from `server:` + `routes:`
 2. **Optional forward proxy** from `proxy:` for `HTTP_PROXY` / `HTTPS_PROXY`
 
+Outbound requests from either listener can use an upstream HTTP client proxy from `http_client:` or from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`.
+
 If `proxy:` is omitted, only the reverse proxy is started.
 
 ## Reverse proxy
@@ -25,6 +27,10 @@ logging:
   enabled: true
   console: true
   log_dir: "logs"
+
+# Optional. proxy_url overrides environment proxy variables.
+http_client:
+  proxy_url: "http://127.0.0.1:3128"
 
 routes:
   # OPENAI_BASE_URL=http://localhost:5601/openrouter
@@ -47,6 +53,22 @@ routes:
   llama.cpp:
     pattern: "/llama.cpp/"
     destination: "http://127.0.0.1:8080/v1/"
+```
+
+## Outbound HTTP client proxy
+
+Use `http_client.proxy_url` to route outbound requests through a specific upstream proxy:
+
+```yaml
+http_client:
+  proxy_url: "http://127.0.0.1:3128"
+```
+
+`proxy_url` overrides environment proxy variables. If `proxy_url` is empty, `proxy_from_environment` defaults to `true`, so `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` are honored. Set it to `false` to force direct outbound connections:
+
+```yaml
+http_client:
+  proxy_from_environment: false
 ```
 
 ## Forward proxy

@@ -2,12 +2,15 @@ package loggingproxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +26,7 @@ type HTTPProxyOptions struct {
 	MITM              bool
 	MITMCertificate   *tls.Certificate
 	UpstreamTLSConfig *tls.Config
+	ClientProxy       HTTPClientProxyConfig
 	Verbose           bool
 }
 
@@ -55,16 +59,25 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		logger = &NoOpLogger{}
 	}
 
-	transport := newDirectTransport()
+	transport, err := newHTTPTransport(options.ClientProxy)
+	if err != nil {
+		return nil, err
+	}
 	transport.DisableCompression = true
 	if options.UpstreamTLSConfig != nil {
 		transport.TLSClientConfig = options.UpstreamTLSConfig.Clone()
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
 	}
 
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Tr = transport
 	proxy.ConnectDial = nil
 	proxy.ConnectDialWithReq = nil
+	if transport.Proxy != nil {
+		proxy.ConnectDialWithReq = newConnectDialWithHTTPClientProxy(proxy, transport, transport.Proxy)
+	}
 	proxy.KeepAcceptEncoding = true
 	proxy.KeepHeader = false
 	proxy.Verbose = options.Verbose
@@ -105,6 +118,62 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	proxy.OnResponse().DoFunc(server.handleResponse)
 
 	return server, nil
+}
+
+func newConnectDialWithHTTPClientProxy(proxy *goproxy.ProxyHttpServer, transport *http.Transport, proxyFunc func(*http.Request) (*url.URL, error)) func(*http.Request, string, string) (net.Conn, error) {
+	return func(request *http.Request, network, addr string) (net.Conn, error) {
+		proxyRequest := requestForConnectProxyLookup(request, addr)
+		proxyURL, err := proxyFunc(proxyRequest)
+		if err != nil {
+			return nil, err
+		}
+		if proxyURL == nil {
+			return dialDirect(transport, request, network, addr)
+		}
+
+		dial := proxy.NewConnectDialToProxyWithHandler(proxyURL.String(), proxyConnectRequestHandler(proxyURL))
+		if dial == nil {
+			return nil, fmt.Errorf("unsupported HTTP client proxy scheme %q for CONNECT", proxyURL.Scheme)
+		}
+		return dial(network, addr)
+	}
+}
+
+func requestForConnectProxyLookup(original *http.Request, addr string) *http.Request {
+	proxyURL := &url.URL{Scheme: "https", Host: addr}
+	if original == nil {
+		return &http.Request{URL: proxyURL}
+	}
+
+	clone := original.Clone(original.Context())
+	clone.URL = proxyURL
+	return clone
+}
+
+func dialDirect(transport *http.Transport, request *http.Request, network, addr string) (net.Conn, error) {
+	ctx := context.Background()
+	if request != nil {
+		ctx = request.Context()
+	}
+	if transport != nil && transport.DialContext != nil {
+		return transport.DialContext(ctx, network, addr)
+	}
+
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, network, addr)
+}
+
+func proxyConnectRequestHandler(proxyURL *url.URL) func(*http.Request) {
+	if proxyURL == nil || proxyURL.User == nil {
+		return nil
+	}
+
+	username := proxyURL.User.Username()
+	password, _ := proxyURL.User.Password()
+	token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	return func(request *http.Request) {
+		request.Header.Set("Proxy-Authorization", "Basic "+token)
+	}
 }
 
 func (s *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {

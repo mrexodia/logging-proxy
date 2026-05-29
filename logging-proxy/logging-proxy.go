@@ -40,6 +40,11 @@ type ProxyConfig struct {
 	} `yaml:"mitm"`
 }
 
+type HTTPClientConfig struct {
+	ProxyURL             string `yaml:"proxy_url"`
+	ProxyFromEnvironment *bool  `yaml:"proxy_from_environment"`
+}
+
 type Config struct {
 	Server struct {
 		Port     int    `yaml:"port"`
@@ -51,6 +56,7 @@ type Config struct {
 		Console bool   `yaml:"console"`
 		LogDir  string `yaml:"log_dir"`
 	} `yaml:"logging"`
+	HTTPClient HTTPClientConfig `yaml:"http_client"`
 	// proxy is optional. If present, a forward proxy listener is started in addition
 	// to the reverse proxy listener configured under server.
 	Proxy  *ProxyConfig     `yaml:"proxy"`
@@ -79,7 +85,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	reverseHandler, err := buildReverseProxy(config, logger)
+	clientProxyConfig := buildHTTPClientProxyConfig(config)
+	logHTTPClientProxyConfig(clientProxyConfig)
+
+	reverseHandler, err := buildReverseProxy(config, logger, clientProxyConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -96,7 +105,7 @@ func main() {
 	}
 
 	if config.Proxy != nil {
-		forwardHandler, err := buildForwardProxy(config.Proxy, logger)
+		forwardHandler, err := buildForwardProxy(config.Proxy, logger, clientProxyConfig)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -142,8 +151,30 @@ func buildGlobalLogger(config *Config) (loggingproxy.Logger, error) {
 	return fileLogger, nil
 }
 
-func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger) (http.Handler, error) {
-	proxy := loggingproxy.NewProxyServer(config.Server.NotFound)
+func buildHTTPClientProxyConfig(config *Config) loggingproxy.HTTPClientProxyConfig {
+	return loggingproxy.HTTPClientProxyConfig{
+		ProxyURL:             strings.TrimSpace(config.HTTPClient.ProxyURL),
+		ProxyFromEnvironment: config.HTTPClient.ProxyFromEnvironment,
+	}
+}
+
+func logHTTPClientProxyConfig(config loggingproxy.HTTPClientProxyConfig) {
+	if config.ProxyURL != "" {
+		log.Printf("HTTP client proxy: %s", config.ProxyURL)
+		return
+	}
+	if config.ProxyFromEnvironment == nil || *config.ProxyFromEnvironment {
+		log.Printf("HTTP client proxy: using HTTP_PROXY, HTTPS_PROXY, and NO_PROXY from the environment")
+		return
+	}
+	log.Printf("HTTP client proxy: disabled")
+}
+
+func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger, clientProxyConfig loggingproxy.HTTPClientProxyConfig) (http.Handler, error) {
+	proxy, err := loggingproxy.NewProxyServerWithHTTPClientProxy(config.Server.NotFound, clientProxyConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure reverse proxy HTTP client: %w", err)
+	}
 	noOpLogger := &loggingproxy.NoOpLogger{}
 
 	hasCatchAll := false
@@ -188,11 +219,12 @@ func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger) (http.H
 	return proxy, nil
 }
 
-func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger) (http.Handler, error) {
+func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, clientProxyConfig loggingproxy.HTTPClientProxyConfig) (http.Handler, error) {
 	options := loggingproxy.HTTPProxyOptions{
-		Logger:  globalLogger,
-		MITM:    config.MITM.Enabled,
-		Verbose: config.Verbose,
+		Logger:      globalLogger,
+		MITM:        config.MITM.Enabled,
+		ClientProxy: clientProxyConfig,
+		Verbose:     config.Verbose,
 	}
 
 	if config.MITM.Enabled {

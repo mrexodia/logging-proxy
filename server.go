@@ -22,6 +22,18 @@ type ProxyServer struct {
 }
 
 func NewProxyServer(notFoundEndpoint string) *ProxyServer {
+	return newProxyServerWithClient(notFoundEndpoint, newDirectHTTPClient())
+}
+
+func NewProxyServerWithHTTPClientProxy(notFoundEndpoint string, proxyConfig HTTPClientProxyConfig) (*ProxyServer, error) {
+	client, err := newHTTPClient(proxyConfig)
+	if err != nil {
+		return nil, err
+	}
+	return newProxyServerWithClient(notFoundEndpoint, client), nil
+}
+
+func newProxyServerWithClient(notFoundEndpoint string, client *http.Client) *ProxyServer {
 	mux := http.NewServeMux()
 	if notFoundEndpoint != "" {
 		if !strings.HasSuffix(notFoundEndpoint, "/") {
@@ -31,9 +43,12 @@ func NewProxyServer(notFoundEndpoint string) *ProxyServer {
 			http.Error(w, fmt.Sprintf("No route found for %s", r.URL.String()), http.StatusNotFound)
 		})
 	}
+	if client == nil {
+		client = newDirectHTTPClient()
+	}
 	return &ProxyServer{
 		mux:    mux,
-		client: newDirectHTTPClient(),
+		client: client,
 	}
 }
 

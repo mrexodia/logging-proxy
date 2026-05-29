@@ -8,6 +8,15 @@ logging:
   console: true          # Enable simple console output (for debugging)
   log_dir: "logs"       # Directory to store log files
 
+# Outbound HTTP client proxy used by reverse proxy routes and by the
+# optional forward proxy when it connects upstream.
+# By default, HTTP_PROXY, HTTPS_PROXY, and NO_PROXY are respected.
+# Set proxy_url to force a specific upstream proxy, or set
+# proxy_from_environment to false to force direct outbound connections.
+# http_client:
+#   proxy_url: "http://127.0.0.1:3128"
+#   proxy_from_environment: true
+
 # Optional forward proxy listener for HTTP_PROXY / HTTPS_PROXY usage.
 # If this block is present, the binary starts a second listener in addition
 # to the reverse proxy above.

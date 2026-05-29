@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -80,6 +81,50 @@ func TestHTTPProxyServerForwardsHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyServerUsesConfiguredUpstreamProxyForHTTP(t *testing.T) {
+	seenRequests := make(chan string, 1)
+	upstreamProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenRequests <- r.URL.String()
+		_, _ = w.Write([]byte("via upstream proxy"))
+	}))
+	defer upstreamProxy.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:      &NoOpLogger{},
+		ClientProxy: HTTPClientProxyConfig{ProxyURL: upstreamProxy.URL},
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	client := newProxyClient(t, proxy.URL, nil)
+	response, err := client.Get("http://example.test/api/test?hello=world")
+	if err != nil {
+		t.Fatalf("proxy request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if string(responseBody) != "via upstream proxy" {
+		t.Fatalf("expected upstream proxy response, got %q", string(responseBody))
+	}
+
+	select {
+	case seenURL := <-seenRequests:
+		expectedURL := "http://example.test/api/test?hello=world"
+		if seenURL != expectedURL {
+			t.Fatalf("expected upstream proxy to receive %q, got %q", expectedURL, seenURL)
+		}
+	default:
+		t.Fatal("upstream proxy did not receive the request")
+	}
+}
+
 func TestHTTPProxyServerSupportsConnectTunnels(t *testing.T) {
 	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "secure %s", r.URL.Path)
@@ -114,6 +159,82 @@ func TestHTTPProxyServerSupportsConnectTunnels(t *testing.T) {
 	if string(responseBody) != expected {
 		t.Fatalf("expected response %q, got %q", expected, string(responseBody))
 	}
+}
+
+func TestHTTPProxyServerUsesConfiguredUpstreamProxyForConnect(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "secure %s", r.URL.Path)
+	}))
+	defer backend.Close()
+
+	seenConnects := make(chan string, 1)
+	upstreamProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			t.Fatalf("expected CONNECT request, got %s", r.Method)
+		}
+		seenConnects <- r.Host
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("upstream proxy response writer does not support hijacking")
+		}
+		clientConn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Fatalf("failed to hijack upstream proxy connection: %v", err)
+		}
+
+		targetConn, err := net.Dial("tcp", r.Host)
+		if err != nil {
+			_, _ = io.WriteString(clientConn, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+			_ = clientConn.Close()
+			return
+		}
+		_, _ = io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		go copyAndCloseConn(targetConn, clientConn)
+		go copyAndCloseConn(clientConn, targetConn)
+	}))
+	defer upstreamProxy.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:      &NoOpLogger{},
+		ClientProxy: HTTPClientProxyConfig{ProxyURL: upstreamProxy.URL},
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	client := newProxyClient(t, proxy.URL, &tls.Config{InsecureSkipVerify: true})
+	response, err := client.Get(backend.URL + "/secret")
+	if err != nil {
+		t.Fatalf("proxy CONNECT request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if string(responseBody) != "secure /secret" {
+		t.Fatalf("expected response %q, got %q", "secure /secret", string(responseBody))
+	}
+
+	select {
+	case seenHost := <-seenConnects:
+		expectedHost := strings.TrimPrefix(backend.URL, "https://")
+		if seenHost != expectedHost {
+			t.Fatalf("expected upstream proxy CONNECT host %q, got %q", expectedHost, seenHost)
+		}
+	default:
+		t.Fatal("upstream proxy did not receive CONNECT")
+	}
+}
+
+func copyAndCloseConn(dst net.Conn, src net.Conn) {
+	_, _ = io.Copy(dst, src)
+	_ = dst.Close()
+	_ = src.Close()
 }
 
 func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
