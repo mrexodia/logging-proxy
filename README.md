@@ -7,7 +7,7 @@ The binary can run two listeners at the same time:
 1. **Reverse proxy** from `server:` + `routes:`
 2. **Optional forward proxy** from `proxy:` for `HTTP_PROXY` / `HTTPS_PROXY`
 
-Outbound requests from either listener can use an upstream HTTP client proxy from `http_client:` or from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`.
+Outbound requests from either listener can use an upstream client proxy from `http_client:` or from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`.
 
 If `proxy:` is omitted, only the reverse proxy is started.
 
@@ -55,7 +55,7 @@ routes:
     destination: "http://127.0.0.1:8080/v1/"
 ```
 
-## Outbound HTTP client proxy
+## Outbound client proxy
 
 Use `http_client.proxy_url` to route outbound requests through a specific upstream proxy:
 
@@ -64,7 +64,14 @@ http_client:
   proxy_url: "http://127.0.0.1:3128"
 ```
 
-`proxy_url` overrides environment proxy variables. If `proxy_url` is empty, `proxy_from_environment` defaults to `true`, so `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` are honored. Set it to `false` to force direct outbound connections:
+SOCKS proxies are also supported:
+
+```yaml
+http_client:
+  proxy_url: "socks5://127.0.0.1:1080"
+```
+
+`proxy_url` overrides environment proxy variables. If `proxy_url` is empty, `proxy_from_environment` defaults to `true`, so `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` are honored. These environment variables may also contain `socks5://` or `socks5h://` URLs. Set it to `false` to force direct outbound connections:
 
 ```yaml
 http_client:

@@ -19,6 +19,7 @@ import (
 
 	"github.com/elazarl/goproxy"
 	"github.com/google/uuid"
+	golangproxy "golang.org/x/net/proxy"
 )
 
 type HTTPProxyOptions struct {
@@ -51,6 +52,16 @@ type teeReadCloser struct {
 	source io.Closer
 	writer io.Closer
 	once   sync.Once
+}
+
+type contextDialerFunc func(context.Context, string, string) (net.Conn, error)
+
+func (f contextDialerFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return f(ctx, network, addr)
+}
+
+func (f contextDialerFunc) Dial(network, addr string) (net.Conn, error) {
+	return f(context.Background(), network, addr)
 }
 
 func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
@@ -131,6 +142,10 @@ func newConnectDialWithHTTPClientProxy(proxy *goproxy.ProxyHttpServer, transport
 			return dialDirect(transport, request, network, addr)
 		}
 
+		if isSOCKSProxyURL(proxyURL) {
+			return dialSOCKSProxy(transport, request, proxyURL, network, addr)
+		}
+
 		dial := proxy.NewConnectDialToProxyWithHandler(proxyURL.String(), proxyConnectRequestHandler(proxyURL))
 		if dial == nil {
 			return nil, fmt.Errorf("unsupported HTTP client proxy scheme %q for CONNECT", proxyURL.Scheme)
@@ -155,12 +170,59 @@ func dialDirect(transport *http.Transport, request *http.Request, network, addr 
 	if request != nil {
 		ctx = request.Context()
 	}
+	return dialDirectContext(transport, ctx, network, addr)
+}
+
+func dialDirectContext(transport *http.Transport, ctx context.Context, network, addr string) (net.Conn, error) {
 	if transport != nil && transport.DialContext != nil {
 		return transport.DialContext(ctx, network, addr)
+	}
+	if transport != nil && transport.Dial != nil {
+		return transport.Dial(network, addr)
 	}
 
 	var dialer net.Dialer
 	return dialer.DialContext(ctx, network, addr)
+}
+
+func dialSOCKSProxy(transport *http.Transport, request *http.Request, proxyURL *url.URL, network, addr string) (net.Conn, error) {
+	ctx := context.Background()
+	if request != nil {
+		ctx = request.Context()
+	}
+
+	forward := contextDialerFunc(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialDirectContext(transport, ctx, network, addr)
+	})
+
+	dialer, err := golangproxy.SOCKS5("tcp", proxyURL.Host, socksProxyAuth(proxyURL), forward)
+	if err != nil {
+		return nil, err
+	}
+	if contextDialer, ok := dialer.(golangproxy.ContextDialer); ok {
+		return contextDialer.DialContext(ctx, network, addr)
+	}
+	return dialer.Dial(network, addr)
+}
+
+func isSOCKSProxyURL(proxyURL *url.URL) bool {
+	if proxyURL == nil {
+		return false
+	}
+	scheme := strings.ToLower(proxyURL.Scheme)
+	return scheme == "socks5" || scheme == "socks5h"
+}
+
+func socksProxyAuth(proxyURL *url.URL) *golangproxy.Auth {
+	if proxyURL == nil || proxyURL.User == nil {
+		return nil
+	}
+
+	password, _ := proxyURL.User.Password()
+	return &golangproxy.Auth{
+		User:     proxyURL.User.Username(),
+		Password: password,
+	}
 }
 
 func proxyConnectRequestHandler(proxyURL *url.URL) func(*http.Request) {
