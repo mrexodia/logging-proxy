@@ -7,13 +7,18 @@ import (
 
 // RequestMetadata contains information about a request for logging
 type RequestMetadata struct {
-	ID                      string `json:"id"`
-	Pattern                 string `json:"pattern"`
-	Method                  string `json:"method"`
-	SourceURL               string `json:"source_url"`
-	DestinationURL          string `json:"target_url"`
-	RequestContentEncoding  string `json:"request_content_encoding,omitempty"`
-	ResponseContentEncoding string `json:"response_content_encoding,omitempty"`
+	ID                       string     `json:"id"`
+	Pattern                  string     `json:"pattern"`
+	Method                   string     `json:"method"`
+	SourceURL                string     `json:"source_url"`
+	DestinationURL           string     `json:"target_url"`
+	RequestStartedAt         time.Time  `json:"request_started_at"`
+	UpstreamResponseAt       *time.Time `json:"upstream_response_at,omitempty"`
+	UpstreamHeaderDurationMS int64      `json:"upstream_header_duration_ms,omitempty"`
+	ResponseStatus           string     `json:"response_status,omitempty"`
+	ResponseStatusCode       int        `json:"response_status_code,omitempty"`
+	RequestContentEncoding   string     `json:"request_content_encoding,omitempty"`
+	ResponseContentEncoding  string     `json:"response_content_encoding,omitempty"`
 }
 
 // Logger interface for dependency injection of logging functionality

@@ -40,10 +40,16 @@ func (f *FileLogger) LogResponse(metadata RequestMetadata, timestamp time.Time, 
 }
 
 type fileLogMetadata struct {
-	StreamType string          `json:"stream_type"`
-	Metadata   RequestMetadata `json:"metadata"`
-	Timestamp  time.Time       `json:"timestamp"`
-	Filename   string          `json:"filename"`
+	StreamType   string          `json:"stream_type"`
+	Metadata     RequestMetadata `json:"metadata"`
+	Timestamp    time.Time       `json:"timestamp"`
+	StartedAt    time.Time       `json:"started_at"`
+	CompletedAt  *time.Time      `json:"completed_at,omitempty"`
+	DurationMS   int64           `json:"duration_ms,omitempty"`
+	BytesWritten int64           `json:"bytes_written"`
+	Completed    bool            `json:"completed"`
+	Error        string          `json:"error,omitempty"`
+	Filename     string          `json:"filename"`
 }
 
 // logRawStream handles the common logic for logging raw HTTP streams
@@ -53,10 +59,27 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	timestampStr := timestamp.Format("2006-01-02_15-04-05.000")
 	filename := fmt.Sprintf("%s_%s_%s.bin", timestampStr, metadata.ID[:8], streamType)
 	filePath := filepath.Join(f.LogDir, filename)
+	metadataFilename := fmt.Sprintf("%s_%s_%s_metadata.json", timestampStr, metadata.ID[:8], streamType)
+	metadataPath := filepath.Join(f.LogDir, metadataFilename)
+
+	logMetadata := fileLogMetadata{
+		StreamType: streamType,
+		Metadata:   metadata,
+		Timestamp:  timestamp,
+		StartedAt:  timestamp,
+		Filename:   filename,
+	}
+
+	// Write an initial metadata record before consuming the stream. If a stream hangs,
+	// the metadata file still exists and shows completed=false.
+	f.writeMetadata(metadataPath, logMetadata)
 
 	// Create the log file
+	// The initial metadata was already written so incomplete streams are visible.
 	logFile, err := os.Create(filePath)
 	if err != nil {
+		logMetadata.Error = fmt.Sprintf("failed to create log file: %v", err)
+		f.writeMetadata(metadataPath, logMetadata)
 		log.Printf("[error] Failed to create log file %s: %v\n", filePath, err)
 		return
 	}
@@ -64,39 +87,50 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 
 	// Write raw HTTP stream (headers + body already combined)
 	bytesWritten, err := io.Copy(logFile, rawStream)
+	completedAt := time.Now()
+	logMetadata.CompletedAt = &completedAt
+	logMetadata.DurationMS = completedAt.Sub(timestamp).Milliseconds()
+	logMetadata.BytesWritten = bytesWritten
+	logMetadata.Completed = err == nil
 	if err != nil {
+		logMetadata.Error = err.Error()
 		log.Printf("[error] Failed to write raw HTTP stream: %v\n", err)
-		return
 	}
 
 	// Create and save metadata
-	logMetadata := fileLogMetadata{
-		StreamType: streamType,
-		Metadata:   metadata,
-		Timestamp:  timestamp,
-		Filename:   filename,
-	}
-
-	metadataFilename := fmt.Sprintf("%s_%s_%s_metadata.json", timestampStr, metadata.ID[:8], streamType)
-	metadataPath := filepath.Join(f.LogDir, metadataFilename)
-
-	metadataFile, err := os.Create(metadataPath)
-	if err != nil {
-		log.Printf("[error] Failed to create metadata file %s: %v\n", metadataPath, err)
-		return
-	}
-	defer metadataFile.Close()
-
-	encoder := json.NewEncoder(metadataFile)
-	encoder.SetIndent("", "  ")
-	err = encoder.Encode(logMetadata)
-	if err != nil {
-		log.Printf("[error] Failed to write metadata file %s: %v\n", metadataPath, err)
-		return
-	}
+	// Rewrite it with completion status, byte count, and duration.
+	f.writeMetadata(metadataPath, logMetadata)
 
 	if f.Console {
 		log.Printf("[%s] %s: %s %s -> %s", streamType, metadata.ID[:8], metadata.Method, metadata.SourceURL, metadata.DestinationURL)
 		log.Printf("[%s] %s: %d bytes saved to %s", streamType, metadata.ID[:8], bytesWritten, filename)
+	}
+}
+
+func (f *FileLogger) writeMetadata(metadataPath string, logMetadata fileLogMetadata) {
+	// Replace metadata atomically so readers never observe partial JSON.
+	tmpFile, err := os.CreateTemp(filepath.Dir(metadataPath), "."+filepath.Base(metadataPath)+".*.tmp")
+	if err != nil {
+		log.Printf("[error] Failed to create metadata file %s: %v\n", metadataPath, err)
+		return
+	}
+	tmpPath := tmpFile.Name()
+
+	encoder := json.NewEncoder(tmpFile)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(logMetadata); err != nil {
+		log.Printf("[error] Failed to write metadata file %s: %v\n", metadataPath, err)
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		log.Printf("[error] Failed to close metadata file %s: %v\n", metadataPath, err)
+		os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, metadataPath); err != nil {
+		log.Printf("[error] Failed to replace metadata file %s: %v\n", metadataPath, err)
+		os.Remove(tmpPath)
 	}
 }

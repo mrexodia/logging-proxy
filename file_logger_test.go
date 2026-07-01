@@ -17,7 +17,7 @@ func TestFileLogging(t *testing.T) {
 	defer os.RemoveAll(logDir) // Clean up after test
 
 	// Create file logger
-	fileLogger, err := NewFileLogger(logDir)
+	fileLogger, err := NewFileLogger(logDir, false)
 	if err != nil {
 		t.Fatalf("Failed to create file logger: %v", err)
 	}

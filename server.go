@@ -165,6 +165,7 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		Method:                 request.Method,
 		SourceURL:              sourceURL,
 		DestinationURL:         destinationURL.String(),
+		RequestStartedAt:       requestTime,
 		RequestContentEncoding: requestContentEncoding,
 	}
 
@@ -244,6 +245,11 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 	responseContentEncoding := response.Header.Get("Content-Encoding")
 
 	// Update metadata with response encoding
+	// Also store upstream response status and header latency.
+	metadata.UpstreamResponseAt = &responseTime
+	metadata.UpstreamHeaderDurationMS = responseTime.Sub(requestTime).Milliseconds()
+	metadata.ResponseStatus = response.Status
+	metadata.ResponseStatusCode = response.StatusCode
 	metadata.ResponseContentEncoding = responseContentEncoding
 
 	// Send response headers as quickly as possible
