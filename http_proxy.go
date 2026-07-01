@@ -26,6 +26,7 @@ type HTTPProxyOptions struct {
 	Logger            Logger
 	MITM              bool
 	MITMCertificate   *tls.Certificate
+	MITMExcludeHosts  []string
 	UpstreamTLSConfig *tls.Config
 	ClientProxy       HTTPClientProxyConfig
 	Verbose           bool
@@ -35,6 +36,7 @@ type HTTPProxyServer struct {
 	proxy       *goproxy.ProxyHttpServer
 	logger      Logger
 	mitmEnabled bool
+	mitmExclude *mitmExcludeMatcher
 }
 
 type httpProxyRequestState struct {
@@ -82,6 +84,11 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		transport.TLSClientConfig = &tls.Config{}
 	}
 
+	mitmExclude, err := newMITMExcludeMatcher(options.MITMExcludeHosts)
+	if err != nil {
+		return nil, err
+	}
+
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Tr = transport
 	proxy.ConnectDial = nil
@@ -102,6 +109,7 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		proxy:       proxy,
 		logger:      logger,
 		mitmEnabled: options.MITM,
+		mitmExclude: mitmExclude,
 	}
 
 	if options.MITM {
@@ -121,6 +129,9 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		proxy.CertStore = &memoryCertStore{certs: map[string]*tls.Certificate{}}
 		mitmAction := &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(options.MITMCertificate)}
 		proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			if server.mitmExclude.Match(host) {
+				return goproxy.OkConnect, host
+			}
 			return mitmAction, host
 		}))
 	}

@@ -32,11 +32,12 @@ type ProxyConfig struct {
 	Port    int    `yaml:"port"`
 	Verbose bool   `yaml:"verbose"`
 	MITM    struct {
-		Enabled      bool   `yaml:"enabled"`
-		CertFile     string `yaml:"cert_file"`
-		KeyFile      string `yaml:"key_file"`
-		CommonName   string `yaml:"common_name"`
-		Organization string `yaml:"organization"`
+		Enabled      bool     `yaml:"enabled"`
+		CertFile     string   `yaml:"cert_file"`
+		KeyFile      string   `yaml:"key_file"`
+		CommonName   string   `yaml:"common_name"`
+		Organization string   `yaml:"organization"`
+		ExcludeHosts []string `yaml:"exclude_hosts"`
 	} `yaml:"mitm"`
 }
 
@@ -221,10 +222,11 @@ func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger, clientP
 
 func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, clientProxyConfig loggingproxy.HTTPClientProxyConfig) (http.Handler, error) {
 	options := loggingproxy.HTTPProxyOptions{
-		Logger:      globalLogger,
-		MITM:        config.MITM.Enabled,
-		ClientProxy: clientProxyConfig,
-		Verbose:     config.Verbose,
+		Logger:           globalLogger,
+		MITM:             config.MITM.Enabled,
+		MITMExcludeHosts: config.MITM.ExcludeHosts,
+		ClientProxy:      clientProxyConfig,
+		Verbose:          config.Verbose,
 	}
 
 	if config.MITM.Enabled {
@@ -239,6 +241,9 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 		}
 		options.MITMCertificate = ca
 		log.Printf("MITM enabled. Trust this CA in Claude Code via NODE_EXTRA_CA_CERTS: %s", defaultString(config.MITM.CertFile, "certs/mitm-ca-cert.pem"))
+		if len(config.MITM.ExcludeHosts) > 0 {
+			log.Printf("MITM excluded hosts: %s", strings.Join(config.MITM.ExcludeHosts, ", "))
+		}
 	}
 
 	proxy, err := loggingproxy.NewHTTPProxyServer(options)

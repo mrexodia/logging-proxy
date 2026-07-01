@@ -95,6 +95,9 @@ proxy:
     key_file: "certs/mitm-ca-key.pem"
     common_name: "logging-proxy MITM CA"
     organization: "logging-proxy"
+    exclude_hosts:
+      - "*.bank.example"
+      - "10.0.0.0/8"
 ```
 
 Forward proxy behavior:
@@ -103,6 +106,8 @@ Forward proxy behavior:
 - HTTPS with MITM decrypts and logs request/response bodies
 
 If the MITM CA files do not exist, they are generated automatically.
+
+`proxy.mitm.exclude_hosts` disables MITM for matching hosts and falls back to opaque CONNECT tunneling. Entries support exact hosts, `*.example.com` suffix wildcards, IP literals, CIDR ranges, and `*` to disable MITM for all hosts.
 
 ## Running
 

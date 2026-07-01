@@ -392,6 +392,82 @@ func copyAndCloseConn(dst net.Conn, src net.Conn) {
 	_ = src.Close()
 }
 
+func TestHTTPProxyServerMITMExcludeHostsTunnelsWithoutLogging(t *testing.T) {
+	logDir := t.TempDir()
+	fileLogger, err := NewFileLogger(logDir, false)
+	if err != nil {
+		t.Fatalf("failed to create file logger: %v", err)
+	}
+
+	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
+		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
+		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM CA: %v", err)
+	}
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read HTTPS request body: %v", err)
+		}
+		defer r.Body.Close()
+
+		fmt.Fprintf(w, "excluded tunnel received %s", string(body))
+	}))
+	defer backend.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:           fileLogger,
+		MITM:             true,
+		MITMCertificate:  ca,
+		MITMExcludeHosts: []string{"127.0.0.1"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	clientRoots := x509.NewCertPool()
+	clientRoots.AddCert(backend.Certificate())
+	client := newProxyClient(t, proxy.URL, &tls.Config{RootCAs: clientRoots})
+
+	requestBody := `{"prompt":"excluded secret"}`
+	request, err := http.NewRequest(http.MethodPost, backend.URL+"/v1/messages", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("failed to create excluded MITM request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("excluded tunnel request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read excluded tunnel response: %v", err)
+	}
+	if !strings.Contains(string(responseBody), "excluded secret") {
+		t.Fatalf("expected excluded tunnel response to contain request body, got %q", string(responseBody))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("failed to read log directory: %v", err)
+	}
+	for _, file := range files {
+		if strings.Contains(file.Name(), "request.bin") || strings.Contains(file.Name(), "response.bin") {
+			t.Fatalf("expected excluded MITM host to skip plaintext logging, found %s", file.Name())
+		}
+	}
+}
+
 func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
 	logDir := t.TempDir()
 	fileLogger, err := NewFileLogger(logDir, false)
