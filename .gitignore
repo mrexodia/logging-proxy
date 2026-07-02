@@ -32,3 +32,5 @@ go.work.sum
 .env
 
 certs/
+config.yaml
+!/config.yaml
