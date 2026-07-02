@@ -26,6 +26,7 @@ type HTTPProxyOptions struct {
 	Logger            Logger
 	MITM              bool
 	MITMCertificate   *tls.Certificate
+	MITMIncludeHosts  []string
 	MITMExcludeHosts  []string
 	UpstreamTLSConfig *tls.Config
 	ClientProxy       HTTPClientProxyConfig
@@ -36,6 +37,7 @@ type HTTPProxyServer struct {
 	proxy       *goproxy.ProxyHttpServer
 	logger      Logger
 	mitmEnabled bool
+	mitmInclude *mitmExcludeMatcher
 	mitmExclude *mitmExcludeMatcher
 }
 
@@ -50,10 +52,10 @@ type memoryCertStore struct {
 }
 
 type teeReadCloser struct {
-	io.Reader
-	source io.Closer
-	writer io.Closer
-	once   sync.Once
+	source          io.ReadCloser
+	writer          *io.PipeWriter
+	once            sync.Once
+	loggingDisabled bool
 }
 
 type contextDialerFunc func(context.Context, string, string) (net.Conn, error)
@@ -76,6 +78,10 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Keep the upstream transport from adding implicit Accept-Encoding: gzip and
+	// auto-decompressing responses. If the client explicitly asks for compressed
+	// data, those compressed bytes should be proxied through unchanged; logging
+	// can decompress its tee'd copy separately.
 	transport.DisableCompression = true
 	if options.UpstreamTLSConfig != nil {
 		transport.TLSClientConfig = options.UpstreamTLSConfig.Clone()
@@ -84,6 +90,10 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		transport.TLSClientConfig = &tls.Config{}
 	}
 
+	mitmInclude, err := newMITMIncludeMatcher(options.MITMIncludeHosts)
+	if err != nil {
+		return nil, err
+	}
 	mitmExclude, err := newMITMExcludeMatcher(options.MITMExcludeHosts)
 	if err != nil {
 		return nil, err
@@ -96,6 +106,8 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	if transport.Proxy != nil {
 		proxy.ConnectDialWithReq = newConnectDialWithHTTPClientProxy(proxy, transport, transport.Proxy)
 	}
+	// Preserve client Accept-Encoding so compressed request/response streams are
+	// proxied through unchanged. The logging path only sees a tee'd copy.
 	proxy.KeepAcceptEncoding = true
 	proxy.KeepHeader = false
 	proxy.Verbose = options.Verbose
@@ -109,6 +121,7 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		proxy:       proxy,
 		logger:      logger,
 		mitmEnabled: options.MITM,
+		mitmInclude: mitmInclude,
 		mitmExclude: mitmExclude,
 	}
 
@@ -129,7 +142,7 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		proxy.CertStore = &memoryCertStore{certs: map[string]*tls.Certificate{}}
 		mitmAction := &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(options.MITMCertificate)}
 		proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-			if server.mitmExclude.Match(host) {
+			if !server.shouldMITMHost(host) {
 				return goproxy.OkConnect, host
 			}
 			return mitmAction, host
@@ -253,6 +266,26 @@ func (s *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.proxy.ServeHTTP(w, r)
 }
 
+func (s *HTTPProxyServer) shouldMITMHost(host string) bool {
+	if s.mitmExclude.Match(host) {
+		return false
+	}
+	if !s.mitmInclude.Empty() && !s.mitmInclude.Match(host) {
+		return false
+	}
+	return true
+}
+
+func (s *HTTPProxyServer) shouldLogHost(host string) bool {
+	if s.mitmExclude.Match(host) {
+		return false
+	}
+	if !s.mitmInclude.Empty() && !s.mitmInclude.Match(host) {
+		return false
+	}
+	return true
+}
+
 func (s *HTTPProxyServer) handleRequest(request *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	if request == nil || request.URL == nil {
 		return request, nil
@@ -266,6 +299,11 @@ func (s *HTTPProxyServer) handleRequest(request *http.Request, ctx *goproxy.Prox
 		pattern = "HTTP_PROXY_MITM"
 	} else if strings.EqualFold(targetURL.Scheme, "https") {
 		pattern = "HTTP_PROXY_HTTPS"
+	}
+
+	if !s.shouldLogHost(targetURL.Host) {
+		ctx.UserData = nil
+		return request, nil
 	}
 
 	metadata := RequestMetadata{
@@ -300,10 +338,23 @@ func (s *HTTPProxyServer) handleResponse(response *http.Response, ctx *goproxy.P
 	responseTime := time.Now()
 	responseHeaders := response.Header.Clone()
 	responseContentEncoding := responseHeaders.Get("Content-Encoding")
+	upstreamProto := response.Proto
 	metadata.ResponseContentEncoding = responseContentEncoding
 
+	// goproxy's MITM path serializes the upstream *http.Response with
+	// response.Write(client). If the upstream connection used HTTP/2, leaving
+	// response.Proto as HTTP/2.0 would write an invalid HTTP/2 status line (and
+	// even Transfer-Encoding: chunked) onto the MITM client's HTTP/1.x TLS stream.
+	// Preserve the upstream protocol in the log, but make the response written to
+	// the client match the protocol used by that client request.
+	if ctx != nil && ctx.Req != nil && strings.EqualFold(metadata.Pattern, "HTTP_PROXY_MITM") {
+		response.Proto = ctx.Req.Proto
+		response.ProtoMajor = ctx.Req.ProtoMajor
+		response.ProtoMinor = ctx.Req.ProtoMinor
+	}
+
 	response.Body = wrapBodyForLogging(response.Body, func(body io.ReadCloser) {
-		s.logHTTPProxyResponse(metadata, responseTime, response.Proto, response.Status, responseHeaders, responseContentEncoding, body)
+		s.logHTTPProxyResponse(metadata, responseTime, upstreamProto, response.Status, responseHeaders, responseContentEncoding, body)
 	})
 
 	return response
@@ -380,12 +431,26 @@ func wrapBodyForLogging(body io.ReadCloser, logFunc func(io.ReadCloser)) io.Read
 
 	reader, writer := io.Pipe()
 	wrapped := &teeReadCloser{
-		Reader: io.TeeReader(body, writer),
 		source: body,
 		writer: writer,
 	}
 	go logFunc(reader)
 	return wrapped
+}
+
+func (t *teeReadCloser) Read(p []byte) (int, error) {
+	n, err := t.source.Read(p)
+	if n > 0 && !t.loggingDisabled {
+		if _, writeErr := t.writer.Write(p[:n]); writeErr != nil {
+			// Logging is best-effort. If the log reader exits early (for example
+			// because decompression detected a truncated gzip stream after a client
+			// cancel), do not turn that side-channel failure into a proxied stream
+			// read error.
+			t.loggingDisabled = true
+			_ = t.writer.CloseWithError(writeErr)
+		}
+	}
+	return n, err
 }
 
 func (t *teeReadCloser) Close() error {

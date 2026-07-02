@@ -95,19 +95,25 @@ proxy:
     key_file: "certs/mitm-ca-key.pem"
     common_name: "logging-proxy MITM CA"
     organization: "logging-proxy"
+    # Optional allow-list. If present, only matching hosts are captured.
+    include_hosts:
+      - "api.anthropic.com"
+      - "*.example.com"
     exclude_hosts:
       - "*.bank.example"
       - "10.0.0.0/8"
 ```
 
 Forward proxy behavior:
-- Plain HTTP requests are logged directly
+- Plain HTTP requests are logged directly unless filtered out by `proxy.mitm.include_hosts`
 - HTTPS without MITM is tunneled with CONNECT, so bodies are encrypted
 - HTTPS with MITM decrypts and logs request/response bodies
 
 If the MITM CA files do not exist, they are generated automatically.
 
-`proxy.mitm.exclude_hosts` disables MITM for matching hosts and falls back to opaque CONNECT tunneling. Entries support exact hosts, `*.example.com` suffix wildcards, IP literals, CIDR ranges, and `*` to disable MITM for all hosts.
+`proxy.mitm.include_hosts` is an optional allow-list. If it is non-empty, only matching hosts are MITM-decrypted/logged; non-matching HTTPS hosts fall back to opaque CONNECT tunneling, and non-matching plain HTTP proxy requests are forwarded without logging.
+
+`proxy.mitm.exclude_hosts` disables capture for matching hosts: HTTPS falls back to opaque CONNECT tunneling and plain HTTP proxy requests are forwarded without logging. If both include and exclude match, exclude wins. Entries support exact hosts, `*.example.com` suffix wildcards, IP literals, CIDR ranges, and `*`.
 
 ## Running
 

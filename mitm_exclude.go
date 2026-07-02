@@ -14,6 +14,14 @@ type mitmExcludeMatcher struct {
 }
 
 func newMITMExcludeMatcher(patterns []string) (*mitmExcludeMatcher, error) {
+	return newMITMHostMatcher(patterns, "MITM exclude host")
+}
+
+func newMITMIncludeMatcher(patterns []string) (*mitmExcludeMatcher, error) {
+	return newMITMHostMatcher(patterns, "MITM include host")
+}
+
+func newMITMHostMatcher(patterns []string, label string) (*mitmExcludeMatcher, error) {
 	matcher := &mitmExcludeMatcher{
 		exactHosts: map[string]struct{}{},
 	}
@@ -30,7 +38,7 @@ func newMITMExcludeMatcher(patterns []string) (*mitmExcludeMatcher, error) {
 		if strings.Contains(pattern, "/") {
 			_, cidr, err := net.ParseCIDR(pattern)
 			if err != nil {
-				return nil, fmt.Errorf("invalid MITM exclude host %q: %w", rawPattern, err)
+				return nil, fmt.Errorf("invalid %s %q: %w", label, rawPattern, err)
 			}
 			matcher.cidrs = append(matcher.cidrs, cidr)
 			continue
@@ -38,7 +46,7 @@ func newMITMExcludeMatcher(patterns []string) (*mitmExcludeMatcher, error) {
 		if strings.HasPrefix(pattern, "*.") {
 			suffix := strings.TrimPrefix(pattern, "*")
 			if suffix == "." {
-				return nil, fmt.Errorf("invalid MITM exclude host %q", rawPattern)
+				return nil, fmt.Errorf("invalid %s %q", label, rawPattern)
 			}
 			matcher.suffixes = append(matcher.suffixes, suffix)
 			continue
@@ -48,6 +56,10 @@ func newMITMExcludeMatcher(patterns []string) (*mitmExcludeMatcher, error) {
 	}
 
 	return matcher, nil
+}
+
+func (m *mitmExcludeMatcher) Empty() bool {
+	return m == nil || (!m.matchAll && len(m.exactHosts) == 0 && len(m.cidrs) == 0 && len(m.suffixes) == 0)
 }
 
 func (m *mitmExcludeMatcher) Match(host string) bool {

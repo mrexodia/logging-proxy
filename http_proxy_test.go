@@ -1,6 +1,7 @@
 package loggingproxy
 
 import (
+	"bufio"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -33,6 +34,16 @@ func newProxyClient(t *testing.T, proxyURL string, tlsConfig *tls.Config) *http.
 	}
 
 	return &http.Client{Transport: transport}
+}
+
+type abandoningLogger struct{}
+
+func (abandoningLogger) LogRequest(_ RequestMetadata, _ time.Time, rawRequestStream io.ReadCloser) {
+	_ = rawRequestStream.Close()
+}
+
+func (abandoningLogger) LogResponse(_ RequestMetadata, _ time.Time, rawResponseStream io.ReadCloser) {
+	_ = rawResponseStream.Close()
 }
 
 func TestHTTPProxyServerForwardsHTTPRequests(t *testing.T) {
@@ -80,6 +91,89 @@ func TestHTTPProxyServerForwardsHTTPRequests(t *testing.T) {
 	expected := "POST /api/test?hello=world payload"
 	if string(responseBody) != expected {
 		t.Fatalf("expected response %q, got %q", expected, string(responseBody))
+	}
+}
+
+func TestHTTPProxyServerPreservesAcceptEncodingBeforeForwarding(t *testing.T) {
+	seenAcceptEncoding := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAcceptEncoding <- r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_stop\ndata: {}\n\n")
+	}))
+	defer backend.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{Logger: &NoOpLogger{}})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	client := newProxyClient(t, proxy.URL, nil)
+	request, err := http.NewRequest(http.MethodGet, backend.URL+"/stream", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	request.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("proxy request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if !strings.Contains(string(responseBody), "message_stop") {
+		t.Fatalf("expected complete streaming response, got %q", string(responseBody))
+	}
+
+	select {
+	case acceptEncoding := <-seenAcceptEncoding:
+		expected := "gzip, deflate, br, zstd"
+		if acceptEncoding != expected {
+			t.Fatalf("expected proxy to preserve Accept-Encoding %q, got %q", expected, acceptEncoding)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backend did not receive request")
+	}
+}
+
+func TestHTTPProxyServerLoggingReaderCloseDoesNotBreakProxying(t *testing.T) {
+	const responseBody = "0123456789abcdef"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		for i := 0; i < 4096; i++ {
+			fmt.Fprint(w, responseBody)
+		}
+	}))
+	defer backend.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{Logger: abandoningLogger{}})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	client := newProxyClient(t, proxy.URL, nil)
+	response, err := client.Get(backend.URL + "/large")
+	if err != nil {
+		t.Fatalf("proxy request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	expected := strings.Repeat(responseBody, 4096)
+	if string(body) != expected {
+		t.Fatalf("expected full proxied body length %d, got %d", len(expected), len(body))
 	}
 }
 
@@ -465,6 +559,238 @@ func TestHTTPProxyServerMITMExcludeHostsTunnelsWithoutLogging(t *testing.T) {
 		if strings.Contains(file.Name(), "request.bin") || strings.Contains(file.Name(), "response.bin") {
 			t.Fatalf("expected excluded MITM host to skip plaintext logging, found %s", file.Name())
 		}
+	}
+}
+
+func TestHTTPProxyServerMITMIncludeHostsTunnelsNonMatchingWithoutLogging(t *testing.T) {
+	logDir := t.TempDir()
+	fileLogger, err := NewFileLogger(logDir, false)
+	if err != nil {
+		t.Fatalf("failed to create file logger: %v", err)
+	}
+
+	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
+		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
+		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM CA: %v", err)
+	}
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read HTTPS request body: %v", err)
+		}
+		defer r.Body.Close()
+
+		fmt.Fprintf(w, "non-included tunnel received %s", string(body))
+	}))
+	defer backend.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:           fileLogger,
+		MITM:             true,
+		MITMCertificate:  ca,
+		MITMIncludeHosts: []string{"api.anthropic.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	clientRoots := x509.NewCertPool()
+	clientRoots.AddCert(backend.Certificate())
+	client := newProxyClient(t, proxy.URL, &tls.Config{RootCAs: clientRoots})
+
+	requestBody := `{"prompt":"non-included secret"}`
+	request, err := http.NewRequest(http.MethodPost, backend.URL+"/v1/messages", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("failed to create non-included MITM request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("non-included tunnel request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read non-included tunnel response: %v", err)
+	}
+	if !strings.Contains(string(responseBody), "non-included secret") {
+		t.Fatalf("expected non-included tunnel response to contain request body, got %q", string(responseBody))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("failed to read log directory: %v", err)
+	}
+	for _, file := range files {
+		if strings.Contains(file.Name(), "request.bin") || strings.Contains(file.Name(), "response.bin") {
+			t.Fatalf("expected non-included MITM host to skip plaintext logging, found %s", file.Name())
+		}
+	}
+}
+
+func TestHTTPProxyServerPlainHTTPIncludeHostsSkipsNonMatchingLogs(t *testing.T) {
+	logDir := t.TempDir()
+	fileLogger, err := NewFileLogger(logDir, false)
+	if err != nil {
+		t.Fatalf("failed to create file logger: %v", err)
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "plain ok")
+	}))
+	defer backend.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:           fileLogger,
+		MITMIncludeHosts: []string{"api.anthropic.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	client := newProxyClient(t, proxy.URL, nil)
+	response, err := client.Get(backend.URL + "/plain")
+	if err != nil {
+		t.Fatalf("plain HTTP proxy request failed: %v", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if string(body) != "plain ok" {
+		t.Fatalf("expected plain response, got %q", string(body))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("failed to read log directory: %v", err)
+	}
+	for _, file := range files {
+		if strings.Contains(file.Name(), "request.bin") || strings.Contains(file.Name(), "response.bin") {
+			t.Fatalf("expected non-included plain HTTP host to skip logging, found %s", file.Name())
+		}
+	}
+}
+
+func TestHTTPProxyServerMITMWritesClientHTTPVersion(t *testing.T) {
+	logDir := t.TempDir()
+	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
+		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
+		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM CA: %v", err)
+	}
+
+	upstreamProto := make(chan string, 1)
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamProto <- r.Proto
+		fmt.Fprint(w, "ok")
+	}))
+	backend.EnableHTTP2 = true
+	backend.StartTLS()
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("failed to parse backend URL: %v", err)
+	}
+	backendHost, _, err := net.SplitHostPort(backendURL.Host)
+	if err != nil {
+		t.Fatalf("failed to split backend host: %v", err)
+	}
+
+	upstreamRoots := x509.NewCertPool()
+	upstreamRoots.AddCert(backend.Certificate())
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:          &NoOpLogger{},
+		MITM:            true,
+		MITMCertificate: ca,
+		UpstreamTLSConfig: &tls.Config{
+			RootCAs: upstreamRoots,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("failed to parse proxy URL: %v", err)
+	}
+
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("failed to dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", backendURL.Host, backendURL.Host); err != nil {
+		t.Fatalf("failed to write CONNECT: %v", err)
+	}
+	connectReader := bufio.NewReader(conn)
+	connectStatus, err := connectReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("failed to read CONNECT response: %v", err)
+	}
+	if !strings.Contains(connectStatus, "200") {
+		t.Fatalf("expected CONNECT 200, got %q", connectStatus)
+	}
+	for {
+		line, err := connectReader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("failed to read CONNECT headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	clientRoots := x509.NewCertPool()
+	clientRoots.AddCert(ca.Leaf)
+	tlsConn := tls.Client(conn, &tls.Config{RootCAs: clientRoots, ServerName: backendHost})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("failed MITM TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	if _, err := fmt.Fprintf(tlsConn, "GET /proto HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", backendURL.Host); err != nil {
+		t.Fatalf("failed to write MITM request: %v", err)
+	}
+	statusLine, err := bufio.NewReader(tlsConn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("failed to read MITM response status: %v", err)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 200") {
+		t.Fatalf("expected MITM response to use client HTTP/1.1 status line, got %q", statusLine)
+	}
+
+	select {
+	case proto := <-upstreamProto:
+		if proto != "HTTP/2.0" {
+			t.Fatalf("expected upstream request to use HTTP/2.0, got %q", proto)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backend did not receive request")
 	}
 }
 

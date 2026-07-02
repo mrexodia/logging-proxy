@@ -38,6 +38,35 @@ func TestMITMExcludeMatcher(t *testing.T) {
 	}
 }
 
+func TestMITMIncludeMatcher(t *testing.T) {
+	matcher, err := newMITMIncludeMatcher([]string{"api.example.com", "*.capture.example"})
+	if err != nil {
+		t.Fatalf("failed to build include matcher: %v", err)
+	}
+	if matcher.Empty() {
+		t.Fatal("expected include matcher to be non-empty")
+	}
+	if !matcher.Match("api.example.com:443") {
+		t.Fatal("expected exact include host to match")
+	}
+	if !matcher.Match("logs.capture.example:443") {
+		t.Fatal("expected wildcard include host to match")
+	}
+	if matcher.Match("other.example.com:443") {
+		t.Fatal("expected non-included host not to match")
+	}
+}
+
+func TestMITMHostMatcherEmpty(t *testing.T) {
+	matcher, err := newMITMIncludeMatcher(nil)
+	if err != nil {
+		t.Fatalf("failed to build empty matcher: %v", err)
+	}
+	if !matcher.Empty() {
+		t.Fatal("expected empty matcher")
+	}
+}
+
 func TestMITMExcludeMatcherMatchAll(t *testing.T) {
 	matcher, err := newMITMExcludeMatcher([]string{"*"})
 	if err != nil {

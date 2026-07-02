@@ -37,6 +37,7 @@ type ProxyConfig struct {
 		KeyFile      string   `yaml:"key_file"`
 		CommonName   string   `yaml:"common_name"`
 		Organization string   `yaml:"organization"`
+		IncludeHosts []string `yaml:"include_hosts"`
 		ExcludeHosts []string `yaml:"exclude_hosts"`
 	} `yaml:"mitm"`
 }
@@ -224,6 +225,7 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 	options := loggingproxy.HTTPProxyOptions{
 		Logger:           globalLogger,
 		MITM:             config.MITM.Enabled,
+		MITMIncludeHosts: config.MITM.IncludeHosts,
 		MITMExcludeHosts: config.MITM.ExcludeHosts,
 		ClientProxy:      clientProxyConfig,
 		Verbose:          config.Verbose,
@@ -241,6 +243,9 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 		}
 		options.MITMCertificate = ca
 		log.Printf("MITM enabled. Trust this CA in Claude Code via NODE_EXTRA_CA_CERTS: %s", defaultString(config.MITM.CertFile, "certs/mitm-ca-cert.pem"))
+		if len(config.MITM.IncludeHosts) > 0 {
+			log.Printf("MITM included hosts: %s", strings.Join(config.MITM.IncludeHosts, ", "))
+		}
 		if len(config.MITM.ExcludeHosts) > 0 {
 			log.Printf("MITM excluded hosts: %s", strings.Join(config.MITM.ExcludeHosts, ", "))
 		}
