@@ -259,7 +259,6 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 			return nil, fmt.Errorf("failed to initialize MITM CA: %w", err)
 		}
 		options.MITMCertificate = ca
-		log.Printf("MITM enabled. Trust this CA in Claude Code via NODE_EXTRA_CA_CERTS: %s", defaultString(config.MITM.CertFile, "certs/mitm-ca-cert.pem"))
 		if len(config.MITM.IncludeHosts) > 0 {
 			log.Printf("MITM included hosts: %s", strings.Join(config.MITM.IncludeHosts, ", "))
 		}

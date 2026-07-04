@@ -50,6 +50,15 @@ func proxyURLWithUser(t *testing.T, rawURL, username, password string) string {
 	return parsedURL.String()
 }
 
+func testMITMCAConfig(logDir string) MITMCAConfig {
+	return MITMCAConfig{
+		CertFile:     filepath.Join(logDir, "mitm-ca-cert.pem"),
+		KeyFile:      filepath.Join(logDir, "mitm-ca-key.pem"),
+		CommonName:   "logging-proxy test MITM CA",
+		Organization: "logging-proxy tests",
+	}
+}
+
 type abandoningLogger struct{}
 
 func (abandoningLogger) LogRequest(_ RequestMetadata, _ time.Time, rawRequestStream io.ReadCloser) {
@@ -694,10 +703,7 @@ func TestHTTPProxyServerMITMExcludeHostsTunnelsWithoutLogging(t *testing.T) {
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
-		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
-		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
-	})
+	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
 	if err != nil {
 		t.Fatalf("failed to create MITM CA: %v", err)
 	}
@@ -770,10 +776,7 @@ func TestHTTPProxyServerMITMExcludeHostsLogsConnectToConsoleOnly(t *testing.T) {
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
-		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
-		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
-	})
+	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
 	if err != nil {
 		t.Fatalf("failed to create MITM CA: %v", err)
 	}
@@ -850,10 +853,7 @@ func TestHTTPProxyServerMITMIncludeHostsTunnelsNonMatchingWithoutLogging(t *test
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
-		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
-		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
-	})
+	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
 	if err != nil {
 		t.Fatalf("failed to create MITM CA: %v", err)
 	}
@@ -971,10 +971,7 @@ func TestHTTPProxyServerPlainHTTPIncludeHostsSkipsNonMatchingLogs(t *testing.T) 
 
 func TestHTTPProxyServerMITMWritesClientHTTPVersion(t *testing.T) {
 	logDir := t.TempDir()
-	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
-		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
-		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
-	})
+	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
 	if err != nil {
 		t.Fatalf("failed to create MITM CA: %v", err)
 	}
@@ -1082,10 +1079,7 @@ func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
-		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
-		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
-	})
+	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
 	if err != nil {
 		t.Fatalf("failed to create MITM CA: %v", err)
 	}

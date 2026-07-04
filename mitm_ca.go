@@ -29,12 +29,6 @@ func LoadOrCreateMITMCA(config MITMCAConfig) (*tls.Certificate, error) {
 	if config.KeyFile == "" {
 		config.KeyFile = filepath.Join("certs", "mitm-ca-key.pem")
 	}
-	if config.CommonName == "" {
-		config.CommonName = "logging-proxy MITM CA"
-	}
-	if config.Organization == "" {
-		config.Organization = "logging-proxy"
-	}
 	if config.ValidFor == 0 {
 		config.ValidFor = 10 * 365 * 24 * time.Hour
 	}
@@ -46,6 +40,9 @@ func LoadOrCreateMITMCA(config MITMCAConfig) (*tls.Certificate, error) {
 	}
 
 	if !certExists {
+		if config.CommonName == "" || config.Organization == "" {
+			return nil, fmt.Errorf("MITM CA files do not exist and automatic generation requires common_name and organization: cert=%s key=%s", config.CertFile, config.KeyFile)
+		}
 		if err := generateMITMCA(config); err != nil {
 			return nil, err
 		}

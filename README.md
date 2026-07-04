@@ -114,7 +114,7 @@ Forward proxy behavior:
 
 `proxy.auth` is optional. When configured, clients must use HTTP Basic proxy authentication, for example `HTTP_PROXY=http://proxy-user:proxy-password@127.0.0.1:8080`.
 
-If the MITM CA files do not exist, they are generated automatically.
+If the MITM CA files do not exist, `common_name` and `organization` are required before the proxy generates them. This prevents a typo in `cert_file` or `key_file` from silently creating a new CA.
 
 `proxy.mitm.include_hosts` is an optional allow-list. If it is non-empty, only matching hosts are MITM-decrypted/logged; non-matching HTTPS hosts fall back to opaque CONNECT tunneling, and non-matching plain HTTP proxy requests are forwarded without logging.
 

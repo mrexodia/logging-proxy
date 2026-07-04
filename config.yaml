@@ -38,6 +38,7 @@ logging:
 #     enabled: true      # Enable to decrypt/log HTTPS traffic
 #     cert_file: "certs/mitm-ca-cert.pem"
 #     key_file: "certs/mitm-ca-key.pem"
+#     # Required if cert/key files do not exist and need to be generated.
 #     common_name: "logging-proxy MITM CA"
 #     organization: "logging-proxy"
 #     exclude_hosts:
