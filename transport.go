@@ -80,6 +80,10 @@ func (config HTTPClientProxyConfig) proxyFromEnvironmentEnabled() bool {
 	return config.ProxyFromEnvironment == nil || *config.ProxyFromEnvironment
 }
 
+func ParseHTTPClientProxyURL(rawProxyURL string) (*url.URL, error) {
+	return parseProxyURL(rawProxyURL)
+}
+
 func parseProxyURL(rawProxyURL string) (*url.URL, error) {
 	rawProxyURL = strings.TrimSpace(rawProxyURL)
 	if rawProxyURL == "" {

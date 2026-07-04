@@ -50,13 +50,18 @@ func proxyURLWithUser(t *testing.T, rawURL, username, password string) string {
 	return parsedURL.String()
 }
 
-func testMITMCAConfig(logDir string) MITMCAConfig {
-	return MITMCAConfig{
-		CertFile:     filepath.Join(logDir, "mitm-ca-cert.pem"),
-		KeyFile:      filepath.Join(logDir, "mitm-ca-key.pem"),
-		CommonName:   "logging-proxy test MITM CA",
+func testMITMCA(t *testing.T, logDir string) *MITMCA {
+	t.Helper()
+
+	ca, err := NewMITMCA(MITMCAConfig{
+		CertsDir:     filepath.Join(logDir, "certs"),
 		Organization: "logging-proxy tests",
+		CRLHost:      "proxy.test:8080",
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM CA: %v", err)
 	}
+	return ca
 }
 
 type abandoningLogger struct{}
@@ -301,6 +306,41 @@ func TestHTTPProxyServerRejectsPartialBasicAuthConfig(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected partial proxy auth config to fail")
+	}
+}
+
+func TestHTTPProxyServerServesMITMCRL(t *testing.T) {
+	ca := testMITMCA(t, t.TempDir())
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:  &NoOpLogger{},
+		MITM:    true,
+		MITMCA:  ca,
+		Verbose: false,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	response, err := http.Get(proxy.URL + "/crl")
+	if err != nil {
+		t.Fatalf("failed to fetch CRL: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected CRL status 200, got %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read CRL: %v", err)
+	}
+	crl, err := x509.ParseRevocationList(body)
+	if err != nil {
+		t.Fatalf("failed to parse CRL: %v", err)
+	}
+	if err := crl.CheckSignatureFrom(ca.intermediateCert); err != nil {
+		t.Fatalf("expected CRL to be signed by intermediate: %v", err)
 	}
 }
 
@@ -703,10 +743,7 @@ func TestHTTPProxyServerMITMExcludeHostsTunnelsWithoutLogging(t *testing.T) {
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
-	if err != nil {
-		t.Fatalf("failed to create MITM CA: %v", err)
-	}
+	ca := testMITMCA(t, logDir)
 
 	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -722,7 +759,7 @@ func TestHTTPProxyServerMITMExcludeHostsTunnelsWithoutLogging(t *testing.T) {
 	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
 		Logger:           fileLogger,
 		MITM:             true,
-		MITMCertificate:  ca,
+		MITMCA:           ca,
 		MITMExcludeHosts: []string{"127.0.0.1"},
 	})
 	if err != nil {
@@ -776,10 +813,7 @@ func TestHTTPProxyServerMITMExcludeHostsLogsConnectToConsoleOnly(t *testing.T) {
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
-	if err != nil {
-		t.Fatalf("failed to create MITM CA: %v", err)
-	}
+	ca := testMITMCA(t, logDir)
 
 	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "excluded ok")
@@ -804,7 +838,7 @@ func TestHTTPProxyServerMITMExcludeHostsLogsConnectToConsoleOnly(t *testing.T) {
 	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
 		Logger:           fileLogger,
 		MITM:             true,
-		MITMCertificate:  ca,
+		MITMCA:           ca,
 		MITMExcludeHosts: []string{"127.0.0.1"},
 	})
 	if err != nil {
@@ -853,10 +887,7 @@ func TestHTTPProxyServerMITMIncludeHostsTunnelsNonMatchingWithoutLogging(t *test
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
-	if err != nil {
-		t.Fatalf("failed to create MITM CA: %v", err)
-	}
+	ca := testMITMCA(t, logDir)
 
 	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -872,7 +903,7 @@ func TestHTTPProxyServerMITMIncludeHostsTunnelsNonMatchingWithoutLogging(t *test
 	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
 		Logger:           fileLogger,
 		MITM:             true,
-		MITMCertificate:  ca,
+		MITMCA:           ca,
 		MITMIncludeHosts: []string{"api.anthropic.com"},
 	})
 	if err != nil {
@@ -971,10 +1002,7 @@ func TestHTTPProxyServerPlainHTTPIncludeHostsSkipsNonMatchingLogs(t *testing.T) 
 
 func TestHTTPProxyServerMITMWritesClientHTTPVersion(t *testing.T) {
 	logDir := t.TempDir()
-	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
-	if err != nil {
-		t.Fatalf("failed to create MITM CA: %v", err)
-	}
+	ca := testMITMCA(t, logDir)
 
 	upstreamProto := make(chan string, 1)
 	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -998,9 +1026,9 @@ func TestHTTPProxyServerMITMWritesClientHTTPVersion(t *testing.T) {
 	upstreamRoots.AddCert(backend.Certificate())
 
 	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
-		Logger:          &NoOpLogger{},
-		MITM:            true,
-		MITMCertificate: ca,
+		Logger: &NoOpLogger{},
+		MITM:   true,
+		MITMCA: ca,
 		UpstreamTLSConfig: &tls.Config{
 			RootCAs: upstreamRoots,
 		},
@@ -1044,7 +1072,7 @@ func TestHTTPProxyServerMITMWritesClientHTTPVersion(t *testing.T) {
 	}
 
 	clientRoots := x509.NewCertPool()
-	clientRoots.AddCert(ca.Leaf)
+	clientRoots.AddCert(ca.rootCert)
 	tlsConn := tls.Client(conn, &tls.Config{RootCAs: clientRoots, ServerName: backendHost})
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("failed MITM TLS handshake: %v", err)
@@ -1079,10 +1107,7 @@ func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
 		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	ca, err := LoadOrCreateMITMCA(testMITMCAConfig(logDir))
-	if err != nil {
-		t.Fatalf("failed to create MITM CA: %v", err)
-	}
+	ca := testMITMCA(t, logDir)
 
 	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -1100,9 +1125,9 @@ func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
 	upstreamRoots.AddCert(backend.Certificate())
 
 	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
-		Logger:          fileLogger,
-		MITM:            true,
-		MITMCertificate: ca,
+		Logger: fileLogger,
+		MITM:   true,
+		MITMCA: ca,
 		UpstreamTLSConfig: &tls.Config{
 			RootCAs: upstreamRoots,
 		},
@@ -1114,7 +1139,7 @@ func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
 	defer proxy.Close()
 
 	clientRoots := x509.NewCertPool()
-	clientRoots.AddCert(ca.Leaf)
+	clientRoots.AddCert(ca.rootCert)
 	client := newProxyClient(t, proxy.URL, &tls.Config{RootCAs: clientRoots})
 
 	requestBody := `{"prompt":"hello claude"}`

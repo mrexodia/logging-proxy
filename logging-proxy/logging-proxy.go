@@ -3,11 +3,15 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	loggingproxy "github.com/mrexodia/logging-proxy"
+	"golang.org/x/net/http/httpproxy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,10 +43,9 @@ type ProxyConfig struct {
 	Auth    *ProxyAuthConfig `yaml:"auth"`
 	MITM    struct {
 		Enabled      bool     `yaml:"enabled"`
-		CertFile     string   `yaml:"cert_file"`
-		KeyFile      string   `yaml:"key_file"`
-		CommonName   string   `yaml:"common_name"`
+		CertsDir     string   `yaml:"certs_dir"`
 		Organization string   `yaml:"organization"`
+		Hostname     string   `yaml:"hostname"`
 		IncludeHosts []string `yaml:"include_hosts"`
 		ExcludeHosts []string `yaml:"exclude_hosts"`
 	} `yaml:"mitm"`
@@ -67,8 +70,7 @@ type Config struct {
 		LogDir  string `yaml:"log_dir"`
 	} `yaml:"logging"`
 	HTTPClient HTTPClientConfig `yaml:"http_client"`
-	// proxy is optional. If present, a forward proxy listener is started in addition
-	// to the reverse proxy listener configured under server.
+	// proxy is optional. If present, a forward proxy listener is started.
 	Proxy  *ProxyConfig     `yaml:"proxy"`
 	Routes map[string]Route `yaml:"routes"`
 }
@@ -96,7 +98,14 @@ func main() {
 	}
 
 	clientProxyConfig := buildHTTPClientProxyConfig(config)
-	logHTTPClientProxyConfig(clientProxyConfig)
+	proxyEndpoints, proxyLogMessage, err := describeHTTPClientProxyConfig(clientProxyConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := validateHTTPClientProxyEndpoints(proxyEndpoints, configuredListenerAddresses(config)); err != nil {
+		log.Fatal(err)
+	}
+	log.Print(proxyLogMessage)
 
 	servers := []namedServer{}
 	if config.Server != nil {
@@ -168,16 +177,233 @@ func buildHTTPClientProxyConfig(config *Config) loggingproxy.HTTPClientProxyConf
 	}
 }
 
-func logHTTPClientProxyConfig(config loggingproxy.HTTPClientProxyConfig) {
-	if config.ProxyURL != "" {
-		log.Printf("HTTP client proxy: %s", config.ProxyURL)
-		return
+type httpClientProxyEndpoint struct {
+	label string
+	url   *url.URL
+}
+
+type listenerAddress struct {
+	name string
+	host string
+	port int
+}
+
+func describeHTTPClientProxyConfig(config loggingproxy.HTTPClientProxyConfig) ([]httpClientProxyEndpoint, string, error) {
+	if strings.TrimSpace(config.ProxyURL) != "" {
+		proxyURL, err := loggingproxy.ParseHTTPClientProxyURL(config.ProxyURL)
+		if err != nil {
+			return nil, "", err
+		}
+		return []httpClientProxyEndpoint{{label: "http_client.proxy_url", url: proxyURL}},
+			fmt.Sprintf("HTTP client proxy: %s (from http_client.proxy_url)", proxyURL.Redacted()), nil
 	}
-	if config.ProxyFromEnvironment == nil || *config.ProxyFromEnvironment {
-		log.Printf("HTTP client proxy: using HTTP_PROXY, HTTPS_PROXY, and NO_PROXY from the environment")
-		return
+
+	if config.ProxyFromEnvironment != nil && !*config.ProxyFromEnvironment {
+		return nil, "HTTP client proxy: disabled", nil
 	}
-	log.Printf("HTTP client proxy: disabled")
+
+	envConfig := httpproxy.FromEnvironment()
+	endpoints := []httpClientProxyEndpoint{}
+	parts := []string{}
+	if strings.TrimSpace(envConfig.HTTPProxy) != "" {
+		proxyURL, err := loggingproxy.ParseHTTPClientProxyURL(envConfig.HTTPProxy)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid HTTP_PROXY: %w", err)
+		}
+		endpoints = append(endpoints, httpClientProxyEndpoint{label: "HTTP_PROXY", url: proxyURL})
+		parts = append(parts, fmt.Sprintf("HTTP_PROXY=%s", proxyURL.Redacted()))
+	}
+	if strings.TrimSpace(envConfig.HTTPSProxy) != "" {
+		proxyURL, err := loggingproxy.ParseHTTPClientProxyURL(envConfig.HTTPSProxy)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid HTTPS_PROXY: %w", err)
+		}
+		endpoints = append(endpoints, httpClientProxyEndpoint{label: "HTTPS_PROXY", url: proxyURL})
+		parts = append(parts, fmt.Sprintf("HTTPS_PROXY=%s", proxyURL.Redacted()))
+	}
+	if strings.TrimSpace(envConfig.NoProxy) != "" {
+		parts = append(parts, fmt.Sprintf("NO_PROXY=%q", envConfig.NoProxy))
+	}
+	if len(endpoints) == 0 {
+		return nil, "HTTP client proxy: none configured", nil
+	}
+	return endpoints, "HTTP client proxy: " + strings.Join(parts, ", "), nil
+}
+
+func configuredListenerAddresses(config *Config) []listenerAddress {
+	listeners := []listenerAddress{}
+	if config.Server != nil {
+		listeners = append(listeners, listenerAddress{name: "reverse", host: config.Server.Host, port: config.Server.Port})
+	}
+	if config.Proxy != nil {
+		listeners = append(listeners, listenerAddress{name: "forward", host: config.Proxy.Host, port: config.Proxy.Port})
+	}
+	return listeners
+}
+
+func validateHTTPClientProxyEndpoints(endpoints []httpClientProxyEndpoint, listeners []listenerAddress) error {
+	for _, endpoint := range endpoints {
+		for _, listener := range listeners {
+			pointsToSelf, err := proxyEndpointPointsToListener(endpoint.url, listener)
+			if err != nil {
+				return fmt.Errorf("failed to resolve HTTP client proxy %s=%s against %s listener %s:%d: %w", endpoint.label, endpoint.url.Redacted(), listener.name, listener.host, listener.port, err)
+			}
+			if pointsToSelf {
+				return fmt.Errorf("HTTP client proxy %s=%s points to this process's %s listener at %s:%d", endpoint.label, endpoint.url.Redacted(), listener.name, listener.host, listener.port)
+			}
+		}
+	}
+	return nil
+}
+
+func proxyEndpointPointsToListener(proxyURL *url.URL, listener listenerAddress) (bool, error) {
+	if proxyURL == nil {
+		return false, nil
+	}
+	proxyPort, err := proxyURLPort(proxyURL)
+	if err != nil {
+		return false, err
+	}
+	if proxyPort != listener.port {
+		return false, nil
+	}
+
+	proxyHost := proxyURL.Hostname()
+	listenerHost := listener.host
+	if isWildcardHost(proxyHost) {
+		return true, nil
+	}
+	if strings.EqualFold(normalizeAddressHost(proxyHost), normalizeAddressHost(listenerHost)) {
+		return true, nil
+	}
+	if isLoopbackHost(proxyHost) && isLoopbackHost(listenerHost) {
+		return true, nil
+	}
+	if isWildcardHost(listenerHost) {
+		return hostResolvesToLocal(proxyHost)
+	}
+
+	proxyIPs, err := resolveHostIPs(proxyHost)
+	if err != nil {
+		return false, err
+	}
+	listenerIPs, err := resolveHostIPs(listenerHost)
+	if err != nil {
+		return false, err
+	}
+	return ipSetsIntersect(proxyIPs, listenerIPs), nil
+}
+
+func proxyURLPort(proxyURL *url.URL) (int, error) {
+	if port := proxyURL.Port(); port != "" {
+		parsedPort, err := strconv.Atoi(port)
+		if err != nil {
+			return 0, fmt.Errorf("invalid proxy port %q", port)
+		}
+		return parsedPort, nil
+	}
+
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "http":
+		return 80, nil
+	case "https":
+		return 443, nil
+	case "socks5", "socks5h":
+		return 1080, nil
+	default:
+		return 0, fmt.Errorf("unsupported proxy scheme %q", proxyURL.Scheme)
+	}
+}
+
+func hostResolvesToLocal(host string) (bool, error) {
+	hostIPs, err := resolveHostIPs(host)
+	if err != nil {
+		return false, err
+	}
+	localIPs, err := localHostIPs()
+	if err != nil {
+		return false, err
+	}
+	return ipSetsIntersect(hostIPs, localIPs), nil
+}
+
+func localHostIPs() ([]net.IP, error) {
+	ips := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, err
+		}
+		for _, addr := range addrs {
+			switch value := addr.(type) {
+			case *net.IPNet:
+				ips = append(ips, value.IP)
+			case *net.IPAddr:
+				ips = append(ips, value.IP)
+			}
+		}
+	}
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		if hostnameIPs, err := net.LookupIP(hostname); err == nil {
+			ips = append(ips, hostnameIPs...)
+		}
+	}
+	return ips, nil
+}
+
+func resolveHostIPs(host string) ([]net.IP, error) {
+	host = normalizeAddressHost(host)
+	if host == "" {
+		return nil, fmt.Errorf("empty host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []net.IP{ip}, nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("host %q resolved to no addresses", host)
+	}
+	return ips, nil
+}
+
+func ipSetsIntersect(a, b []net.IP) bool {
+	for _, left := range a {
+		for _, right := range b {
+			if left != nil && right != nil && left.Equal(right) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isWildcardHost(host string) bool {
+	host = normalizeAddressHost(host)
+	return host == "" || host == "0.0.0.0" || host == "::"
+}
+
+func isLoopbackHost(host string) bool {
+	host = normalizeAddressHost(host)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func normalizeAddressHost(host string) string {
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	host = strings.TrimSuffix(host, ".")
+	return strings.ToLower(host)
 }
 
 func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger, clientProxyConfig loggingproxy.HTTPClientProxyConfig) (http.Handler, error) {
@@ -251,16 +477,19 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 	}
 
 	if config.MITM.Enabled {
-		ca, err := loggingproxy.LoadOrCreateMITMCA(loggingproxy.MITMCAConfig{
-			CertFile:     config.MITM.CertFile,
-			KeyFile:      config.MITM.KeyFile,
-			CommonName:   config.MITM.CommonName,
+		crlHost, err := crlHostname(config.MITM.Hostname, config.Host, config.Port)
+		if err != nil {
+			return nil, err
+		}
+		ca, err := loggingproxy.NewMITMCA(loggingproxy.MITMCAConfig{
+			CertsDir:     config.MITM.CertsDir,
 			Organization: config.MITM.Organization,
+			CRLHost:      crlHost,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize MITM CA: %w", err)
 		}
-		options.MITMCertificate = ca
+		options.MITMCA = ca
 		if len(config.MITM.IncludeHosts) > 0 {
 			log.Printf("MITM included hosts: %s", strings.Join(config.MITM.IncludeHosts, ", "))
 		}
@@ -274,6 +503,27 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 		return nil, err
 	}
 	return proxy, nil
+}
+
+func crlHostname(configuredHostname, listenHost string, port int) (string, error) {
+	host := strings.TrimSpace(configuredHostname)
+	if host == "" {
+		host = strings.TrimSpace(listenHost)
+	}
+	if strings.Contains(host, "://") {
+		return "", fmt.Errorf("proxy.mitm.hostname must be a hostname or host:port, not a URL: %q", host)
+	}
+	if isWildcardHost(host) {
+		return "", fmt.Errorf("proxy.mitm.hostname is required when proxy.host is %q", listenHost)
+	}
+	if splitHost, splitPort, err := net.SplitHostPort(host); err == nil {
+		if splitHost == "" || splitPort == "" || isWildcardHost(splitHost) {
+			return "", fmt.Errorf("invalid proxy.mitm.hostname %q", host)
+		}
+		return host, nil
+	}
+	host = normalizeAddressHost(host)
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func loadConfig(filename string) (*Config, error) {

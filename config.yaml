@@ -20,13 +20,12 @@ logging:
 #   proxy_from_environment: true
 
 # Optional forward proxy listener for HTTP_PROXY / HTTPS_PROXY usage.
-# If this block is present, the binary starts a second listener in addition
-# to the reverse proxy above.
+# If this block is present, the binary starts a forward proxy listener.
 #
-# Claude Code example:
+# Client environment example:
 #   HTTP_PROXY=http://127.0.0.1:8080
 #   HTTPS_PROXY=http://127.0.0.1:8080
-#   NODE_EXTRA_CA_CERTS=/absolute/path/to/certs/mitm-ca-cert.pem
+#   # Trust /absolute/path/to/certs/root-ca.crt when MITM is enabled.
 #
 # proxy:
 #   port: 8080
@@ -37,11 +36,10 @@ logging:
 #     password: "proxy-password"
 #   mitm:
 #     enabled: true      # Enable to decrypt/log HTTPS traffic
-#     cert_file: "certs/mitm-ca-cert.pem"
-#     key_file: "certs/mitm-ca-key.pem"
-#     # Required if cert/key files do not exist and need to be generated.
-#     common_name: "logging-proxy MITM CA"
+#     certs_dir: "certs"
 #     organization: "logging-proxy"
+#     # Hostname used in the CRL URL. Required when proxy.host is 0.0.0.0, ::, or empty.
+#     hostname: "proxy.example.lan"
 #     exclude_hosts:
 #       - "*.bank.example"
 #       - "10.0.0.0/8"

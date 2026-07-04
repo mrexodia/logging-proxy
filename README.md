@@ -94,10 +94,10 @@ proxy:
     password: "proxy-password"
   mitm:
     enabled: true
-    cert_file: "certs/mitm-ca-cert.pem"
-    key_file: "certs/mitm-ca-key.pem"
-    common_name: "logging-proxy MITM CA"
+    certs_dir: "certs"
     organization: "logging-proxy"
+    # Hostname used in the CRL URL. Required when proxy.host is 0.0.0.0, ::, or empty.
+    hostname: "proxy.example.lan"
     # Optional allow-list. If present, only matching hosts are captured.
     include_hosts:
       - "api.anthropic.com"
@@ -114,7 +114,7 @@ Forward proxy behavior:
 
 `proxy.auth` is optional. When configured, clients must use HTTP Basic proxy authentication, for example `HTTP_PROXY=http://proxy-user:proxy-password@127.0.0.1:8080`.
 
-If the MITM CA files do not exist, `common_name` and `organization` are required before the proxy generates them. This prevents a typo in `cert_file` or `key_file` from silently creating a new CA.
+MITM creates or loads a persistent root/intermediate CA hierarchy in `proxy.mitm.certs_dir`. Trust `root-ca.crt` once on clients. Leaf certificates are signed by the intermediate CA, expire after 24 hours, and include a CRL distribution point at `http://<hostname>:<proxy-port>/crl`. `proxy.mitm.hostname` overrides the CRL hostname and is required when `proxy.host` is `0.0.0.0`, `::`, or empty.
 
 `proxy.mitm.include_hosts` is an optional allow-list. If it is non-empty, only matching hosts are MITM-decrypted/logged; non-matching HTTPS hosts fall back to opaque CONNECT tunneling, and non-matching plain HTTP proxy requests are forwarded without logging.
 
@@ -128,14 +128,14 @@ go run ./logging-proxy
 
 With both `server:` and `proxy:` present, both listeners start.
 
-## Claude Code setup
+## MITM client setup
 
-For HTTPS body capture, enable `proxy.mitm.enabled` and trust the generated CA:
+For HTTPS body capture, enable `proxy.mitm.enabled` and trust the generated root CA:
 
 ```bash
 export HTTP_PROXY=http://127.0.0.1:8080
 export HTTPS_PROXY=http://127.0.0.1:8080
-export NODE_EXTRA_CA_CERTS=/absolute/path/to/certs/mitm-ca-cert.pem
+# Add /absolute/path/to/certs/root-ca.crt to the client's trust store.
 ```
 
 Without MITM, HTTPS bodies are not visible.

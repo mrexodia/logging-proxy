@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -31,7 +30,7 @@ type HTTPProxyAuthConfig struct {
 type HTTPProxyOptions struct {
 	Logger            Logger
 	MITM              bool
-	MITMCertificate   *tls.Certificate
+	MITMCA            *MITMCA
 	MITMIncludeHosts  []string
 	MITMExcludeHosts  []string
 	UpstreamTLSConfig *tls.Config
@@ -45,6 +44,7 @@ type HTTPProxyServer struct {
 	logger        Logger
 	authenticator *httpProxyAuthenticator
 	mitmEnabled   bool
+	mitmCA        *MITMCA
 	mitmInclude   *mitmExcludeMatcher
 	mitmExclude   *mitmExcludeMatcher
 }
@@ -57,11 +57,6 @@ type httpProxyAuthenticator struct {
 type httpProxyRequestState struct {
 	metadata    RequestMetadata
 	requestTime time.Time
-}
-
-type memoryCertStore struct {
-	mu    sync.Mutex
-	certs map[string]*tls.Certificate
 }
 
 type teeReadCloser struct {
@@ -140,6 +135,7 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		logger:        logger,
 		authenticator: authenticator,
 		mitmEnabled:   options.MITM,
+		mitmCA:        options.MITMCA,
 		mitmInclude:   mitmInclude,
 		mitmExclude:   mitmExclude,
 	}
@@ -150,21 +146,10 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	}
 
 	if options.MITM {
-		if options.MITMCertificate == nil {
-			return nil, fmt.Errorf("MITM mode requires a CA certificate")
+		if options.MITMCA == nil {
+			return nil, fmt.Errorf("MITM mode requires a MITM CA")
 		}
-		if options.MITMCertificate.Leaf == nil {
-			if len(options.MITMCertificate.Certificate) == 0 {
-				return nil, fmt.Errorf("MITM CA certificate chain is empty")
-			}
-			leaf, err := x509.ParseCertificate(options.MITMCertificate.Certificate[0])
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse MITM CA leaf certificate: %w", err)
-			}
-			options.MITMCertificate.Leaf = leaf
-		}
-		proxy.CertStore = &memoryCertStore{certs: map[string]*tls.Certificate{}}
-		mitmAction := &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(options.MITMCertificate)}
+		mitmAction := &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: options.MITMCA.TLSConfigForHost()}
 		proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 			if !server.shouldMITMHost(host) {
 				server.logHTTPProxyConnect(host, ctx)
@@ -288,6 +273,10 @@ func proxyConnectRequestHandler(proxyURL *url.URL) func(*http.Request) {
 }
 
 func (s *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.mitmCA != nil && r.URL != nil && r.URL.Path == "/crl" && !r.URL.IsAbs() {
+		s.mitmCA.ServeCRL(w, r)
+		return
+	}
 	s.proxy.ServeHTTP(w, r)
 }
 
@@ -603,22 +592,6 @@ func (t *teeReadCloser) Close() error {
 		err = errors.Join(t.source.Close(), t.writer.Close())
 	})
 	return err
-}
-
-func (s *memoryCertStore) Fetch(hostname string, gen func() (*tls.Certificate, error)) (*tls.Certificate, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if cert, ok := s.certs[hostname]; ok {
-		return cert, nil
-	}
-
-	cert, err := gen()
-	if err != nil {
-		return nil, err
-	}
-	s.certs[hostname] = cert
-	return cert, nil
 }
 
 func cloneURL(u *url.URL) *url.URL {

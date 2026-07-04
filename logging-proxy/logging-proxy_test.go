@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	loggingproxy "github.com/mrexodia/logging-proxy"
 )
 
 func writeTestConfig(t *testing.T, content string) string {
@@ -15,6 +17,127 @@ func writeTestConfig(t *testing.T, content string) string {
 		t.Fatalf("failed to write config: %v", err)
 	}
 	return path
+}
+
+func TestCRLHostnameUsesConfiguredMITMHostname(t *testing.T) {
+	got, err := crlHostname("litellm.ogilvie.lan", "0.0.0.0", 8841)
+	if err != nil {
+		t.Fatalf("crlHostname failed: %v", err)
+	}
+	want := "litellm.ogilvie.lan:8841"
+	if got != want {
+		t.Fatalf("crlHostname() = %q, want %q", got, want)
+	}
+}
+
+func TestCRLHostnameFallsBackToConcreteListenHost(t *testing.T) {
+	got, err := crlHostname("", "proxy.example", 8841)
+	if err != nil {
+		t.Fatalf("crlHostname failed: %v", err)
+	}
+	want := "proxy.example:8841"
+	if got != want {
+		t.Fatalf("crlHostname() = %q, want %q", got, want)
+	}
+}
+
+func TestCRLHostnameRejectsWildcardListenHostWithoutMITMHostname(t *testing.T) {
+	for _, host := range []string{"0.0.0.0", "::", ""} {
+		_, err := crlHostname("", host, 8841)
+		if err == nil {
+			t.Fatalf("expected crlHostname to reject wildcard host %q", host)
+		}
+		if !strings.Contains(err.Error(), "proxy.mitm.hostname is required") {
+			t.Fatalf("unexpected error for host %q: %v", host, err)
+		}
+	}
+}
+
+func TestCRLHostnameRejectsWildcardMITMHostnameWithPort(t *testing.T) {
+	for _, host := range []string{"0.0.0.0:8841", "[::]:8841"} {
+		_, err := crlHostname(host, "127.0.0.1", 8841)
+		if err == nil {
+			t.Fatalf("expected crlHostname to reject wildcard MITM hostname %q", host)
+		}
+		if !strings.Contains(err.Error(), "invalid proxy.mitm.hostname") {
+			t.Fatalf("unexpected error for host %q: %v", host, err)
+		}
+	}
+}
+
+func TestDescribeHTTPClientProxyConfigExplicitProxy(t *testing.T) {
+	endpoints, message, err := describeHTTPClientProxyConfig(loggingproxy.HTTPClientProxyConfig{
+		ProxyURL: "http://user:pass@proxy.example:3128",
+	})
+	if err != nil {
+		t.Fatalf("describeHTTPClientProxyConfig failed: %v", err)
+	}
+	if len(endpoints) != 1 {
+		t.Fatalf("expected one proxy endpoint, got %d", len(endpoints))
+	}
+	if endpoints[0].label != "http_client.proxy_url" {
+		t.Fatalf("unexpected endpoint label %q", endpoints[0].label)
+	}
+	if endpoints[0].url.Host != "proxy.example:3128" {
+		t.Fatalf("unexpected endpoint URL %q", endpoints[0].url.String())
+	}
+	if !strings.Contains(message, "http_client.proxy_url") || !strings.Contains(message, "proxy.example:3128") {
+		t.Fatalf("unexpected proxy log message %q", message)
+	}
+	if strings.Contains(message, "pass") {
+		t.Fatalf("proxy log message leaked password: %q", message)
+	}
+}
+
+func TestValidateHTTPClientProxyRejectsSelfProxyOnWildcardListener(t *testing.T) {
+	proxyURL, err := loggingproxy.ParseHTTPClientProxyURL("http://127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("failed to parse proxy URL: %v", err)
+	}
+
+	err = validateHTTPClientProxyEndpoints(
+		[]httpClientProxyEndpoint{{label: "HTTP_PROXY", url: proxyURL}},
+		[]listenerAddress{{name: "forward", host: "0.0.0.0", port: 8080}},
+	)
+	if err == nil {
+		t.Fatal("expected self proxy to fail")
+	}
+	if !strings.Contains(err.Error(), "points to this process") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateHTTPClientProxyRejectsSelfProxyOnResolvedListener(t *testing.T) {
+	proxyURL, err := loggingproxy.ParseHTTPClientProxyURL("http://127.0.0.1:5601")
+	if err != nil {
+		t.Fatalf("failed to parse proxy URL: %v", err)
+	}
+
+	err = validateHTTPClientProxyEndpoints(
+		[]httpClientProxyEndpoint{{label: "HTTP_PROXY", url: proxyURL}},
+		[]listenerAddress{{name: "reverse", host: "localhost", port: 5601}},
+	)
+	if err == nil {
+		t.Fatal("expected self proxy to fail")
+	}
+	if !strings.Contains(err.Error(), "points to this process") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateHTTPClientProxyAllowsDifferentPort(t *testing.T) {
+	proxyURL, err := loggingproxy.ParseHTTPClientProxyURL("http://127.0.0.1:3128")
+	if err != nil {
+		t.Fatalf("failed to parse proxy URL: %v", err)
+	}
+
+	err = validateHTTPClientProxyEndpoints(
+		[]httpClientProxyEndpoint{{label: "HTTP_PROXY", url: proxyURL}},
+		[]listenerAddress{{name: "forward", host: "127.0.0.1", port: 8080}},
+	)
+	if err != nil {
+		t.Fatalf("expected different port to pass, got %v", err)
+	}
 }
 
 func TestLoadConfigAllowsProxyOnlyConfig(t *testing.T) {
