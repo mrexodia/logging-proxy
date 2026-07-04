@@ -93,6 +93,13 @@ type readCloser struct {
 	io.Closer
 }
 
+func shouldSkipLoggedRequestHeader(name string) bool {
+	return strings.EqualFold(name, "Host") ||
+		strings.EqualFold(name, "Content-Encoding") ||
+		strings.EqualFold(name, "Proxy-Authorization") ||
+		strings.EqualFold(name, "Proxy-Authenticate")
+}
+
 // decompressReader returns a reader that decompresses the input based on the Content-Encoding.
 // If encoding is empty or unknown, it returns the original reader.
 // Supports: gzip, deflate, br (brotli), compress, identity
@@ -208,10 +215,9 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		// Write request line with full destination URL
 		fmt.Fprintf(&headerBuf, "%s %s %s\r\n", request.Method, destinationURL.String(), request.Proto)
 
-		// Write remaining headers (skip Host and Content-Encoding headers)
+		// Write remaining headers, excluding hop-by-hop proxy auth and decompressed encoding headers.
 		for name, values := range request.Header {
-			// Skip Host header (URL is absolute) and Content-Encoding (we're logging decompressed)
-			if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Encoding") {
+			if shouldSkipLoggedRequestHeader(name) {
 				continue
 			}
 			for _, value := range values {

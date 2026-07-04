@@ -27,10 +27,16 @@ type Route struct {
 	Logging     *bool  `yaml:"logging"`
 }
 
+type ProxyAuthConfig struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
 type ProxyConfig struct {
-	Host    string `yaml:"host"`
-	Port    int    `yaml:"port"`
-	Verbose bool   `yaml:"verbose"`
+	Host    string           `yaml:"host"`
+	Port    int              `yaml:"port"`
+	Verbose bool             `yaml:"verbose"`
+	Auth    *ProxyAuthConfig `yaml:"auth"`
 	MITM    struct {
 		Enabled      bool     `yaml:"enabled"`
 		CertFile     string   `yaml:"cert_file"`
@@ -229,6 +235,17 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 		MITMExcludeHosts: config.MITM.ExcludeHosts,
 		ClientProxy:      clientProxyConfig,
 		Verbose:          config.Verbose,
+	}
+
+	if config.Auth != nil {
+		if config.Auth.Username == "" || config.Auth.Password == "" {
+			return nil, fmt.Errorf("proxy.auth requires both username and password")
+		}
+		options.Auth = loggingproxy.HTTPProxyAuthConfig{
+			Username: config.Auth.Username,
+			Password: config.Auth.Password,
+		}
+		log.Printf("Forward proxy authentication enabled for user %q", config.Auth.Username)
 	}
 
 	if config.MITM.Enabled {

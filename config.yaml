@@ -31,6 +31,9 @@ logging:
 #   port: 8080
 #   host: "127.0.0.1"
 #   verbose: false
+#   auth:
+#     username: "proxy-user"
+#     password: "proxy-password"
 #   mitm:
 #     enabled: true      # Enable to decrypt/log HTTPS traffic
 #     cert_file: "certs/mitm-ca-cert.pem"

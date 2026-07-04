@@ -3,6 +3,7 @@ package loggingproxy
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -22,6 +23,11 @@ import (
 	golangproxy "golang.org/x/net/proxy"
 )
 
+type HTTPProxyAuthConfig struct {
+	Username string
+	Password string
+}
+
 type HTTPProxyOptions struct {
 	Logger            Logger
 	MITM              bool
@@ -30,15 +36,22 @@ type HTTPProxyOptions struct {
 	MITMExcludeHosts  []string
 	UpstreamTLSConfig *tls.Config
 	ClientProxy       HTTPClientProxyConfig
+	Auth              HTTPProxyAuthConfig
 	Verbose           bool
 }
 
 type HTTPProxyServer struct {
-	proxy       *goproxy.ProxyHttpServer
-	logger      Logger
-	mitmEnabled bool
-	mitmInclude *mitmExcludeMatcher
-	mitmExclude *mitmExcludeMatcher
+	proxy         *goproxy.ProxyHttpServer
+	logger        Logger
+	authenticator *httpProxyAuthenticator
+	mitmEnabled   bool
+	mitmInclude   *mitmExcludeMatcher
+	mitmExclude   *mitmExcludeMatcher
+}
+
+type httpProxyAuthenticator struct {
+	username string
+	password string
 }
 
 type httpProxyRequestState struct {
@@ -72,6 +85,11 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	logger := options.Logger
 	if logger == nil {
 		logger = &NoOpLogger{}
+	}
+
+	authenticator, err := newHTTPProxyAuthenticator(options.Auth)
+	if err != nil {
+		return nil, err
 	}
 
 	transport, err := newHTTPTransport(options.ClientProxy)
@@ -118,11 +136,17 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	}
 
 	server := &HTTPProxyServer{
-		proxy:       proxy,
-		logger:      logger,
-		mitmEnabled: options.MITM,
-		mitmInclude: mitmInclude,
-		mitmExclude: mitmExclude,
+		proxy:         proxy,
+		logger:        logger,
+		authenticator: authenticator,
+		mitmEnabled:   options.MITM,
+		mitmInclude:   mitmInclude,
+		mitmExclude:   mitmExclude,
+	}
+
+	if server.authenticator != nil {
+		proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(server.handleConnectAuth))
+		proxy.OnRequest().DoFunc(server.handleRequestAuth)
 	}
 
 	if options.MITM {
@@ -287,6 +311,93 @@ func (s *HTTPProxyServer) shouldLogHost(host string) bool {
 	return true
 }
 
+func newHTTPProxyAuthenticator(config HTTPProxyAuthConfig) (*httpProxyAuthenticator, error) {
+	if config.Username == "" && config.Password == "" {
+		return nil, nil
+	}
+	if config.Username == "" || config.Password == "" {
+		return nil, fmt.Errorf("proxy authentication requires both username and password")
+	}
+	return &httpProxyAuthenticator{username: config.Username, password: config.Password}, nil
+}
+
+func (a *httpProxyAuthenticator) Valid(header string) bool {
+	if a == nil {
+		return true
+	}
+
+	username, password, ok := parseProxyBasicAuth(header)
+	if !ok {
+		return false
+	}
+	usernameOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.username)) == 1
+	passwordOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.password)) == 1
+	return usernameOK && passwordOK
+}
+
+func parseProxyBasicAuth(header string) (string, string, bool) {
+	const prefix = "Basic "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return "", "", false
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(header[len(prefix):]))
+	if err != nil {
+		return "", "", false
+	}
+	username, password, ok := strings.Cut(string(decoded), ":")
+	return username, password, ok
+}
+
+func (s *HTTPProxyServer) handleRequestAuth(request *http.Request, _ *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	if s.authenticator == nil {
+		return request, nil
+	}
+	if request != nil && s.authenticator.Valid(request.Header.Get("Proxy-Authorization")) {
+		request.Header.Del("Proxy-Authorization")
+		return request, nil
+	}
+	return request, proxyAuthRequiredResponse(request)
+}
+
+func (s *HTTPProxyServer) handleConnectAuth(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+	if s.authenticator == nil {
+		return nil, host
+	}
+
+	var request *http.Request
+	if ctx != nil {
+		request = ctx.Req
+	}
+	if request != nil && s.authenticator.Valid(request.Header.Get("Proxy-Authorization")) {
+		request.Header.Del("Proxy-Authorization")
+		return nil, host
+	}
+	if ctx != nil {
+		ctx.Resp = proxyAuthRequiredResponse(request)
+	}
+	return goproxy.RejectConnect, host
+}
+
+func proxyAuthRequiredResponse(request *http.Request) *http.Response {
+	body := "proxy authentication required\n"
+	response := &http.Response{
+		Request:       request,
+		Header:        make(http.Header),
+		StatusCode:    http.StatusProxyAuthRequired,
+		Status:        fmt.Sprintf("%d %s", http.StatusProxyAuthRequired, http.StatusText(http.StatusProxyAuthRequired)),
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		ContentLength: int64(len(body)),
+		Body:          io.NopCloser(strings.NewReader(body)),
+	}
+	response.Header.Set("Content-Type", goproxy.ContentTypeText)
+	response.Header.Set("Proxy-Authenticate", `Basic realm="logging-proxy"`)
+	response.Header.Set("Connection", "close")
+	return response
+}
+
 func (s *HTTPProxyServer) logHTTPProxyConnect(host string, ctx *goproxy.ProxyCtx) {
 	connectLogger, ok := s.logger.(ConnectLogger)
 	if !ok {
@@ -399,7 +510,7 @@ func (s *HTTPProxyServer) logHTTPProxyRequest(metadata RequestMetadata, timestam
 	var headerBuf bytes.Buffer
 	fmt.Fprintf(&headerBuf, "%s %s %s\r\n", method, target, proto)
 	for name, values := range headers {
-		if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Encoding") {
+		if shouldSkipLoggedRequestHeader(name) {
 			continue
 		}
 		for _, value := range values {

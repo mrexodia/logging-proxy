@@ -89,6 +89,9 @@ proxy:
   port: 8080
   host: "127.0.0.1"
   verbose: false
+  auth:
+    username: "proxy-user"
+    password: "proxy-password"
   mitm:
     enabled: true
     cert_file: "certs/mitm-ca-cert.pem"
@@ -108,6 +111,8 @@ Forward proxy behavior:
 - Plain HTTP requests are logged directly unless filtered out by `proxy.mitm.include_hosts`
 - HTTPS without MITM is tunneled with CONNECT, so bodies are encrypted
 - HTTPS with MITM decrypts and logs request/response bodies
+
+`proxy.auth` is optional. When configured, clients must use HTTP Basic proxy authentication, for example `HTTP_PROXY=http://proxy-user:proxy-password@127.0.0.1:8080`.
 
 If the MITM CA files do not exist, they are generated automatically.
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -36,6 +37,17 @@ func newProxyClient(t *testing.T, proxyURL string, tlsConfig *tls.Config) *http.
 	}
 
 	return &http.Client{Transport: transport}
+}
+
+func proxyURLWithUser(t *testing.T, rawURL, username, password string) string {
+	t.Helper()
+
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("failed to parse proxy URL: %v", err)
+	}
+	parsedURL.User = url.UserPassword(username, password)
+	return parsedURL.String()
 }
 
 type abandoningLogger struct{}
@@ -93,6 +105,193 @@ func TestHTTPProxyServerForwardsHTTPRequests(t *testing.T) {
 	expected := "POST /api/test?hello=world payload"
 	if string(responseBody) != expected {
 		t.Fatalf("expected response %q, got %q", expected, string(responseBody))
+	}
+}
+
+func TestHTTPProxyServerRequiresBasicAuthForHTTPRequests(t *testing.T) {
+	seenProxyAuthorization := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenProxyAuthorization <- r.Header.Get("Proxy-Authorization")
+		fmt.Fprint(w, "authorized")
+	}))
+	defer backend.Close()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger: &NoOpLogger{},
+		Auth: HTTPProxyAuthConfig{
+			Username: "user",
+			Password: "pass",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	unauthorizedClient := newProxyClient(t, proxy.URL, nil)
+	unauthorizedResponse, err := unauthorizedClient.Get(backend.URL + "/blocked")
+	if err != nil {
+		t.Fatalf("unauthorized proxy request failed: %v", err)
+	}
+	defer unauthorizedResponse.Body.Close()
+	if unauthorizedResponse.StatusCode != http.StatusProxyAuthRequired {
+		t.Fatalf("expected unauthorized status 407, got %d", unauthorizedResponse.StatusCode)
+	}
+	if got := unauthorizedResponse.Header.Get("Proxy-Authenticate"); got != `Basic realm="logging-proxy"` {
+		t.Fatalf("expected Proxy-Authenticate challenge, got %q", got)
+	}
+	select {
+	case <-seenProxyAuthorization:
+		t.Fatal("backend received unauthorized request")
+	default:
+	}
+
+	authorizedClient := newProxyClient(t, proxyURLWithUser(t, proxy.URL, "user", "pass"), nil)
+	authorizedResponse, err := authorizedClient.Get(backend.URL + "/allowed")
+	if err != nil {
+		t.Fatalf("authorized proxy request failed: %v", err)
+	}
+	defer authorizedResponse.Body.Close()
+	if authorizedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("expected authorized status 200, got %d", authorizedResponse.StatusCode)
+	}
+	body, err := io.ReadAll(authorizedResponse.Body)
+	if err != nil {
+		t.Fatalf("failed to read authorized response: %v", err)
+	}
+	if string(body) != "authorized" {
+		t.Fatalf("expected authorized response body, got %q", string(body))
+	}
+
+	select {
+	case proxyAuthorization := <-seenProxyAuthorization:
+		if proxyAuthorization != "" {
+			t.Fatalf("proxy authorization header leaked upstream: %q", proxyAuthorization)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backend did not receive authorized request")
+	}
+}
+
+func TestHTTPProxyServerRequiresBasicAuthForConnect(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "connect authorized")
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("failed to parse backend URL: %v", err)
+	}
+	backendHost, _, err := net.SplitHostPort(backendURL.Host)
+	if err != nil {
+		t.Fatalf("failed to split backend host: %v", err)
+	}
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger: &NoOpLogger{},
+		Auth: HTTPProxyAuthConfig{
+			Username: "user",
+			Password: "pass",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("failed to parse proxy URL: %v", err)
+	}
+
+	unauthorizedConn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("failed to dial proxy: %v", err)
+	}
+	if _, err := fmt.Fprintf(unauthorizedConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", backendURL.Host, backendURL.Host); err != nil {
+		t.Fatalf("failed to write unauthorized CONNECT: %v", err)
+	}
+	unauthorizedReader := bufio.NewReader(unauthorizedConn)
+	unauthorizedStatus, err := unauthorizedReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("failed to read unauthorized CONNECT response: %v", err)
+	}
+	if !strings.Contains(unauthorizedStatus, "407") {
+		t.Fatalf("expected CONNECT 407, got %q", unauthorizedStatus)
+	}
+	var unauthorizedHeaders strings.Builder
+	for {
+		line, err := unauthorizedReader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("failed to read unauthorized CONNECT headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+		unauthorizedHeaders.WriteString(line)
+	}
+	if !strings.Contains(unauthorizedHeaders.String(), `Proxy-Authenticate: Basic realm="logging-proxy"`) {
+		t.Fatalf("expected CONNECT auth challenge, got %q", unauthorizedHeaders.String())
+	}
+	unauthorizedConn.Close()
+
+	authorizedConn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("failed to dial proxy: %v", err)
+	}
+	defer authorizedConn.Close()
+	token := base64.StdEncoding.EncodeToString([]byte("user:pass"))
+	if _, err := fmt.Fprintf(authorizedConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n", backendURL.Host, backendURL.Host, token); err != nil {
+		t.Fatalf("failed to write authorized CONNECT: %v", err)
+	}
+	authorizedReader := bufio.NewReader(authorizedConn)
+	authorizedStatus, err := authorizedReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("failed to read authorized CONNECT response: %v", err)
+	}
+	if !strings.Contains(authorizedStatus, "200") {
+		t.Fatalf("expected CONNECT 200, got %q", authorizedStatus)
+	}
+	for {
+		line, err := authorizedReader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("failed to read authorized CONNECT headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	clientRoots := x509.NewCertPool()
+	clientRoots.AddCert(backend.Certificate())
+	tlsConn := tls.Client(authorizedConn, &tls.Config{RootCAs: clientRoots, ServerName: backendHost})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("failed CONNECT TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	if _, err := fmt.Fprintf(tlsConn, "GET /secure HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", backendURL.Host); err != nil {
+		t.Fatalf("failed to write tunneled request: %v", err)
+	}
+	tunneledStatus, err := bufio.NewReader(tlsConn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("failed to read tunneled response: %v", err)
+	}
+	if !strings.HasPrefix(tunneledStatus, "HTTP/1.1 200") {
+		t.Fatalf("expected tunneled status 200, got %q", tunneledStatus)
+	}
+}
+
+func TestHTTPProxyServerRejectsPartialBasicAuthConfig(t *testing.T) {
+	_, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger: &NoOpLogger{},
+		Auth:   HTTPProxyAuthConfig{Username: "user"},
+	})
+	if err == nil {
+		t.Fatal("expected partial proxy auth config to fail")
 	}
 }
 
