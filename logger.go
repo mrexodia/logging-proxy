@@ -30,6 +30,11 @@ type Logger interface {
 	LogResponse(metadata RequestMetadata, timestamp time.Time, rawResponseStream io.ReadCloser)
 }
 
+// ConnectLogger is optionally implemented by loggers that want console-only CONNECT visibility.
+type ConnectLogger interface {
+	LogConnect(metadata RequestMetadata, timestamp time.Time)
+}
+
 // NoOpLogger is a logger that does nothing (for when logging is disabled)
 type NoOpLogger struct{}
 

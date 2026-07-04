@@ -163,3 +163,10 @@ Go `http.ServeMux` supports wildcards, but this proxy currently rejects named wi
 ```bash
 go test ./...
 ```
+
+## Build for Linux
+
+```bash
+cd logging-proxy
+GOOS=linux GOARCH=amd64 go build .
+```

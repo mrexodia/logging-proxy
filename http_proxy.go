@@ -143,6 +143,7 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		mitmAction := &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(options.MITMCertificate)}
 		proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 			if !server.shouldMITMHost(host) {
+				server.logHTTPProxyConnect(host, ctx)
 				return goproxy.OkConnect, host
 			}
 			return mitmAction, host
@@ -284,6 +285,38 @@ func (s *HTTPProxyServer) shouldLogHost(host string) bool {
 		return false
 	}
 	return true
+}
+
+func (s *HTTPProxyServer) logHTTPProxyConnect(host string, ctx *goproxy.ProxyCtx) {
+	connectLogger, ok := s.logger.(ConnectLogger)
+	if !ok {
+		return
+	}
+
+	timestamp := time.Now()
+	method := http.MethodConnect
+	target := host
+	if ctx != nil && ctx.Req != nil {
+		if ctx.Req.Method != "" {
+			method = ctx.Req.Method
+		}
+		if ctx.Req.Host != "" {
+			target = ctx.Req.Host
+		}
+		if ctx.Req.URL != nil && ctx.Req.URL.Host != "" {
+			target = ctx.Req.URL.Host
+		}
+	}
+
+	metadata := RequestMetadata{
+		ID:               uuid.New().String(),
+		Pattern:          "HTTP_PROXY_CONNECT",
+		Method:           method,
+		SourceURL:        target,
+		DestinationURL:   target,
+		RequestStartedAt: timestamp,
+	}
+	connectLogger.LogConnect(metadata, timestamp)
 }
 
 func (s *HTTPProxyServer) handleRequest(request *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {

@@ -2,11 +2,13 @@ package loggingproxy
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -558,6 +560,86 @@ func TestHTTPProxyServerMITMExcludeHostsTunnelsWithoutLogging(t *testing.T) {
 	for _, file := range files {
 		if strings.Contains(file.Name(), "request.bin") || strings.Contains(file.Name(), "response.bin") {
 			t.Fatalf("expected excluded MITM host to skip plaintext logging, found %s", file.Name())
+		}
+	}
+}
+
+func TestHTTPProxyServerMITMExcludeHostsLogsConnectToConsoleOnly(t *testing.T) {
+	logDir := t.TempDir()
+	fileLogger, err := NewFileLogger(logDir, true)
+	if err != nil {
+		t.Fatalf("failed to create file logger: %v", err)
+	}
+
+	ca, err := LoadOrCreateMITMCA(MITMCAConfig{
+		CertFile: filepath.Join(logDir, "mitm-ca-cert.pem"),
+		KeyFile:  filepath.Join(logDir, "mitm-ca-key.pem"),
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM CA: %v", err)
+	}
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "excluded ok")
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("failed to parse backend URL: %v", err)
+	}
+
+	var console bytes.Buffer
+	oldOutput := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&console)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldOutput)
+		log.SetFlags(oldFlags)
+	}()
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:           fileLogger,
+		MITM:             true,
+		MITMCertificate:  ca,
+		MITMExcludeHosts: []string{"127.0.0.1"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	clientRoots := x509.NewCertPool()
+	clientRoots.AddCert(backend.Certificate())
+	client := newProxyClient(t, proxy.URL, &tls.Config{RootCAs: clientRoots})
+
+	response, err := client.Get(backend.URL + "/v1/messages")
+	if err != nil {
+		t.Fatalf("excluded tunnel request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatalf("failed to read excluded tunnel response: %v", err)
+	}
+
+	output := console.String()
+	expectedConnect := "CONNECT " + backendURL.Host
+	if !strings.Contains(output, expectedConnect) {
+		t.Fatalf("expected console output to contain %q, got %q", expectedConnect, output)
+	}
+	if strings.Contains(output, expectedConnect+" ->") {
+		t.Fatalf("expected CONNECT console output to omit redundant destination, got %q", output)
+	}
+
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("failed to read log directory: %v", err)
+	}
+	for _, file := range files {
+		if strings.Contains(file.Name(), "_request") || strings.Contains(file.Name(), "_response") {
+			t.Fatalf("expected excluded MITM host to skip disk logging, found %s", file.Name())
 		}
 	}
 }

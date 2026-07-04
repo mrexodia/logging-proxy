@@ -10,6 +10,33 @@ import (
 	"time"
 )
 
+func TestFormatConsoleRequestOmitsRedundantDestination(t *testing.T) {
+	target := "https://api.anthropic.com:443/v1/mcp_servers?limit=1000"
+	got := formatConsoleRequest(RequestMetadata{
+		Method:         http.MethodGet,
+		SourceURL:      target,
+		DestinationURL: target,
+	})
+
+	want := "GET " + target
+	if got != want {
+		t.Fatalf("formatConsoleRequest() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatConsoleRequestKeepsDifferentDestination(t *testing.T) {
+	got := formatConsoleRequest(RequestMetadata{
+		Method:         http.MethodPost,
+		SourceURL:      "http://localhost:5601/anthropic/v1/messages",
+		DestinationURL: "https://api.anthropic.com/v1/messages",
+	})
+
+	want := "POST http://localhost:5601/anthropic/v1/messages -> https://api.anthropic.com/v1/messages"
+	if got != want {
+		t.Fatalf("formatConsoleRequest() = %q, want %q", got, want)
+	}
+}
+
 func TestFileLogging(t *testing.T) {
 	// Create a temporary directory for logging
 	logDir := "test_logs"

@@ -39,6 +39,14 @@ func (f *FileLogger) LogResponse(metadata RequestMetadata, timestamp time.Time, 
 	f.logRawStream(metadata, timestamp, rawResponseStream, "response")
 }
 
+// LogConnect logs a CONNECT tunnel event to the console without creating disk logs.
+func (f *FileLogger) LogConnect(metadata RequestMetadata, _ time.Time) {
+	if !f.Console {
+		return
+	}
+	log.Printf("[connect] %s: %s", shortMetadataID(metadata), formatConsoleRequest(metadata))
+}
+
 type fileLogMetadata struct {
 	StreamType   string          `json:"stream_type"`
 	Metadata     RequestMetadata `json:"metadata"`
@@ -57,9 +65,10 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	defer rawStream.Close()
 
 	timestampStr := timestamp.Format("2006-01-02_15-04-05.000")
-	filename := fmt.Sprintf("%s_%s_%s.bin", timestampStr, metadata.ID[:8], streamType)
+	metadataID := shortMetadataID(metadata)
+	filename := fmt.Sprintf("%s_%s_%s.bin", timestampStr, metadataID, streamType)
 	filePath := filepath.Join(f.LogDir, filename)
-	metadataFilename := fmt.Sprintf("%s_%s_%s_metadata.json", timestampStr, metadata.ID[:8], streamType)
+	metadataFilename := fmt.Sprintf("%s_%s_%s_metadata.json", timestampStr, metadataID, streamType)
 	metadataPath := filepath.Join(f.LogDir, metadataFilename)
 
 	logMetadata := fileLogMetadata{
@@ -102,9 +111,23 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	f.writeMetadata(metadataPath, logMetadata)
 
 	if f.Console {
-		log.Printf("[%s] %s: %s %s -> %s", streamType, metadata.ID[:8], metadata.Method, metadata.SourceURL, metadata.DestinationURL)
-		log.Printf("[%s] %s: %d bytes saved to %s", streamType, metadata.ID[:8], bytesWritten, filename)
+		log.Printf("[%s] %s: %s", streamType, metadataID, formatConsoleRequest(metadata))
+		log.Printf("[%s] %s: %d bytes saved to %s", streamType, metadataID, bytesWritten, filename)
 	}
+}
+
+func shortMetadataID(metadata RequestMetadata) string {
+	if len(metadata.ID) <= 8 {
+		return metadata.ID
+	}
+	return metadata.ID[:8]
+}
+
+func formatConsoleRequest(metadata RequestMetadata) string {
+	if metadata.DestinationURL == "" || metadata.DestinationURL == metadata.SourceURL {
+		return fmt.Sprintf("%s %s", metadata.Method, metadata.SourceURL)
+	}
+	return fmt.Sprintf("%s %s -> %s", metadata.Method, metadata.SourceURL, metadata.DestinationURL)
 }
 
 func (f *FileLogger) writeMetadata(metadataPath string, logMetadata fileLogMetadata) {
