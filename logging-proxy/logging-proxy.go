@@ -42,12 +42,13 @@ type ProxyConfig struct {
 	Verbose bool             `yaml:"verbose"`
 	Auth    *ProxyAuthConfig `yaml:"auth"`
 	MITM    struct {
-		Enabled      bool     `yaml:"enabled"`
-		CertsDir     string   `yaml:"certs_dir"`
-		Organization string   `yaml:"organization"`
-		Hostname     string   `yaml:"hostname"`
-		IncludeHosts []string `yaml:"include_hosts"`
-		ExcludeHosts []string `yaml:"exclude_hosts"`
+		Enabled                   bool     `yaml:"enabled"`
+		CertsDir                  string   `yaml:"certs_dir"`
+		Organization              string   `yaml:"organization"`
+		Hostname                  string   `yaml:"hostname"`
+		IncludeHosts              []string `yaml:"include_hosts"`
+		ExcludeHosts              []string `yaml:"exclude_hosts"`
+		LoggingExcludeURLPrefixes []string `yaml:"logging_exclude_url_prefixes"`
 	} `yaml:"mitm"`
 }
 
@@ -457,12 +458,13 @@ func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger, clientP
 
 func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, clientProxyConfig loggingproxy.HTTPClientProxyConfig) (http.Handler, error) {
 	options := loggingproxy.HTTPProxyOptions{
-		Logger:           globalLogger,
-		MITM:             config.MITM.Enabled,
-		MITMIncludeHosts: config.MITM.IncludeHosts,
-		MITMExcludeHosts: config.MITM.ExcludeHosts,
-		ClientProxy:      clientProxyConfig,
-		Verbose:          config.Verbose,
+		Logger:                    globalLogger,
+		MITM:                      config.MITM.Enabled,
+		MITMIncludeHosts:          config.MITM.IncludeHosts,
+		MITMExcludeHosts:          config.MITM.ExcludeHosts,
+		LoggingExcludeURLPrefixes: config.MITM.LoggingExcludeURLPrefixes,
+		ClientProxy:               clientProxyConfig,
+		Verbose:                   config.Verbose,
 	}
 
 	if config.Auth != nil {
@@ -495,6 +497,9 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 		}
 		if len(config.MITM.ExcludeHosts) > 0 {
 			log.Printf("MITM excluded hosts: %s", strings.Join(config.MITM.ExcludeHosts, ", "))
+		}
+		if len(config.MITM.LoggingExcludeURLPrefixes) > 0 {
+			log.Printf("MITM logging excluded URL prefixes: %s", strings.Join(config.MITM.LoggingExcludeURLPrefixes, ", "))
 		}
 	}
 

@@ -28,25 +28,27 @@ type HTTPProxyAuthConfig struct {
 }
 
 type HTTPProxyOptions struct {
-	Logger            Logger
-	MITM              bool
-	MITMCA            *MITMCA
-	MITMIncludeHosts  []string
-	MITMExcludeHosts  []string
-	UpstreamTLSConfig *tls.Config
-	ClientProxy       HTTPClientProxyConfig
-	Auth              HTTPProxyAuthConfig
-	Verbose           bool
+	Logger                    Logger
+	MITM                      bool
+	MITMCA                    *MITMCA
+	MITMIncludeHosts          []string
+	MITMExcludeHosts          []string
+	LoggingExcludeURLPrefixes []string
+	UpstreamTLSConfig         *tls.Config
+	ClientProxy               HTTPClientProxyConfig
+	Auth                      HTTPProxyAuthConfig
+	Verbose                   bool
 }
 
 type HTTPProxyServer struct {
-	proxy         *goproxy.ProxyHttpServer
-	logger        Logger
-	authenticator *httpProxyAuthenticator
-	mitmEnabled   bool
-	mitmCA        *MITMCA
-	mitmInclude   *mitmExcludeMatcher
-	mitmExclude   *mitmExcludeMatcher
+	proxy                     *goproxy.ProxyHttpServer
+	logger                    Logger
+	authenticator             *httpProxyAuthenticator
+	mitmEnabled               bool
+	mitmCA                    *MITMCA
+	mitmInclude               *mitmExcludeMatcher
+	mitmExclude               *mitmExcludeMatcher
+	loggingExcludeURLPrefixes *urlPrefixMatcher
 }
 
 type httpProxyAuthenticator struct {
@@ -111,6 +113,10 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	loggingExcludeURLPrefixes, err := newURLPrefixMatcher(options.LoggingExcludeURLPrefixes)
+	if err != nil {
+		return nil, err
+	}
 
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Tr = transport
@@ -131,13 +137,14 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 	}
 
 	server := &HTTPProxyServer{
-		proxy:         proxy,
-		logger:        logger,
-		authenticator: authenticator,
-		mitmEnabled:   options.MITM,
-		mitmCA:        options.MITMCA,
-		mitmInclude:   mitmInclude,
-		mitmExclude:   mitmExclude,
+		proxy:                     proxy,
+		logger:                    logger,
+		authenticator:             authenticator,
+		mitmEnabled:               options.MITM,
+		mitmCA:                    options.MITMCA,
+		mitmInclude:               mitmInclude,
+		mitmExclude:               mitmExclude,
+		loggingExcludeURLPrefixes: loggingExcludeURLPrefixes,
 	}
 
 	if server.authenticator != nil {
@@ -300,6 +307,19 @@ func (s *HTTPProxyServer) shouldLogHost(host string) bool {
 	return true
 }
 
+func (s *HTTPProxyServer) shouldLogURL(targetURL *url.URL) bool {
+	if targetURL == nil {
+		return false
+	}
+	if !s.shouldLogHost(targetURL.Host) {
+		return false
+	}
+	if s.loggingExcludeURLPrefixes.Match(targetURL) {
+		return false
+	}
+	return true
+}
+
 func newHTTPProxyAuthenticator(config HTTPProxyAuthConfig) (*httpProxyAuthenticator, error) {
 	if config.Username == "" && config.Password == "" {
 		return nil, nil
@@ -434,7 +454,7 @@ func (s *HTTPProxyServer) handleRequest(request *http.Request, ctx *goproxy.Prox
 		pattern = "HTTP_PROXY_HTTPS"
 	}
 
-	if !s.shouldLogHost(targetURL.Host) {
+	if !s.shouldLogURL(targetURL) {
 		ctx.UserData = nil
 		return request, nil
 	}

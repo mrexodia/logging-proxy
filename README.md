@@ -98,6 +98,11 @@ proxy:
     organization: "logging-proxy"
     # Hostname used in the CRL URL. Required when proxy.host is 0.0.0.0, ::, or empty.
     hostname: "proxy.example.lan"
+    logging_exclude_url_prefixes:
+      # Trailing slash matches everything below this prefix.
+      - "https://openrouter.ai/api/v1/models/"
+      # Without trailing slash, only that endpoint is skipped.
+      - "https://openrouter.ai/api/v1/models"
     # Optional allow-list. If present, only matching hosts are captured.
     include_hosts:
       - "api.anthropic.com"
@@ -115,6 +120,8 @@ Forward proxy behavior:
 `proxy.auth` is optional. When configured, clients must use HTTP Basic proxy authentication, for example `HTTP_PROXY=http://proxy-user:proxy-password@127.0.0.1:8080`.
 
 MITM creates or loads a persistent root/intermediate CA hierarchy in `proxy.mitm.certs_dir`. Trust `root-ca.crt` once on clients. Leaf certificates are signed by the intermediate CA, expire after 24 hours, and include a CRL distribution point at `http://<hostname>:<proxy-port>/crl`. `proxy.mitm.hostname` overrides the CRL hostname and is required when `proxy.host` is `0.0.0.0`, `::`, or empty.
+
+`proxy.mitm.logging_exclude_url_prefixes` skips disk logging for matching decrypted URLs while still forwarding the requests. Entries are absolute `http://` or `https://` URLs. A path ending in `/` matches everything below that prefix; a path without trailing `/` matches only that endpoint.
 
 `proxy.mitm.include_hosts` is an optional allow-list. If it is non-empty, only matching hosts are MITM-decrypted/logged; non-matching HTTPS hosts fall back to opaque CONNECT tunneling, and non-matching plain HTTP proxy requests are forwarded without logging.
 

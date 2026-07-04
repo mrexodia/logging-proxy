@@ -40,6 +40,11 @@ logging:
 #     organization: "logging-proxy"
 #     # Hostname used in the CRL URL. Required when proxy.host is 0.0.0.0, ::, or empty.
 #     hostname: "proxy.example.lan"
+#     logging_exclude_url_prefixes:
+#       # Trailing slash matches everything below this prefix.
+#       - "https://openrouter.ai/api/v1/models/"
+#       # Without trailing slash, only that endpoint is skipped.
+#       - "https://openrouter.ai/api/v1/models"
 #     exclude_hosts:
 #       - "*.bank.example"
 #       - "10.0.0.0/8"

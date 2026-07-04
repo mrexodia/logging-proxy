@@ -1100,6 +1100,78 @@ func TestHTTPProxyServerMITMWritesClientHTTPVersion(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyServerMITMLoggingExcludeURLPrefixesSkipsDiskLogs(t *testing.T) {
+	logDir := t.TempDir()
+	fileLogger, err := NewFileLogger(logDir, false)
+	if err != nil {
+		t.Fatalf("failed to create file logger: %v", err)
+	}
+
+	ca := testMITMCA(t, logDir)
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read HTTPS request body: %v", err)
+		}
+		defer r.Body.Close()
+		fmt.Fprintf(w, "excluded prefix received %s", string(body))
+	}))
+	defer backend.Close()
+
+	upstreamRoots := x509.NewCertPool()
+	upstreamRoots.AddCert(backend.Certificate())
+
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{
+		Logger:                    fileLogger,
+		MITM:                      true,
+		MITMCA:                    ca,
+		LoggingExcludeURLPrefixes: []string{backend.URL + "/v1/models/"},
+		UpstreamTLSConfig: &tls.Config{
+			RootCAs: upstreamRoots,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create MITM proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	clientRoots := x509.NewCertPool()
+	clientRoots.AddCert(ca.rootCert)
+	client := newProxyClient(t, proxy.URL, &tls.Config{RootCAs: clientRoots})
+
+	request, err := http.NewRequest(http.MethodPost, backend.URL+"/v1/models/list", strings.NewReader("large models payload"))
+	if err != nil {
+		t.Fatalf("failed to create MITM request: %v", err)
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("MITM proxy request failed: %v", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read MITM response: %v", err)
+	}
+	if !strings.Contains(string(responseBody), "large models payload") {
+		t.Fatalf("expected proxied response to contain request body, got %q", string(responseBody))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("failed to read log directory: %v", err)
+	}
+	for _, file := range files {
+		if strings.Contains(file.Name(), "request.bin") || strings.Contains(file.Name(), "response.bin") {
+			t.Fatalf("expected excluded URL prefix to skip disk logging, found %s", file.Name())
+		}
+	}
+}
+
 func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
 	logDir := t.TempDir()
 	fileLogger, err := NewFileLogger(logDir, false)
