@@ -1,3 +1,4 @@
+# Optional reverse proxy listener. Omit this section to run only the forward proxy.
 server:
   port: 5601
   host: "localhost"

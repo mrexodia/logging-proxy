@@ -2,18 +2,18 @@
 
 HTTP proxy tooling for capturing full request/response traffic.
 
-The binary can run two listeners at the same time:
+The binary can run two listener types:
 
 1. **Reverse proxy** from `server:` + `routes:`
-2. **Optional forward proxy** from `proxy:` for `HTTP_PROXY` / `HTTPS_PROXY`
+2. **Forward proxy** from `proxy:` for `HTTP_PROXY` / `HTTPS_PROXY`
 
 Outbound requests from either listener can use an upstream client proxy from `http_client:` or from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`.
 
-If `proxy:` is omitted, only the reverse proxy is started.
+At least one of `server:` or `proxy:` must be configured. If `proxy:` is omitted, only the reverse proxy starts. If `server:` is omitted, only the forward proxy starts.
 
 ## Reverse proxy
 
-The reverse proxy listens on `server.host:server.port` and routes requests using `routes`.
+When `server:` is configured, the reverse proxy listens on `server.host:server.port` and routes requests using `routes`.
 
 Example:
 
@@ -126,7 +126,7 @@ If the MITM CA files do not exist, `common_name` and `organization` are required
 go run ./logging-proxy
 ```
 
-With `proxy:` present, both listeners start.
+With both `server:` and `proxy:` present, both listeners start.
 
 ## Claude Code setup
 

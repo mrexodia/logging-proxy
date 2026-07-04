@@ -53,12 +53,14 @@ type HTTPClientConfig struct {
 	ProxyFromEnvironment *bool  `yaml:"proxy_from_environment"`
 }
 
+type ServerConfig struct {
+	Port     int    `yaml:"port"`
+	Host     string `yaml:"host"`
+	NotFound string `yaml:"not_found"`
+}
+
 type Config struct {
-	Server struct {
-		Port     int    `yaml:"port"`
-		Host     string `yaml:"host"`
-		NotFound string `yaml:"not_found"`
-	} `yaml:"server"`
+	Server  *ServerConfig `yaml:"server"`
 	Logging struct {
 		Enabled bool   `yaml:"enabled"`
 		Console bool   `yaml:"console"`
@@ -96,20 +98,20 @@ func main() {
 	clientProxyConfig := buildHTTPClientProxyConfig(config)
 	logHTTPClientProxyConfig(clientProxyConfig)
 
-	reverseHandler, err := buildReverseProxy(config, logger, clientProxyConfig)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	servers := []namedServer{
-		{
+	servers := []namedServer{}
+	if config.Server != nil {
+		reverseHandler, err := buildReverseProxy(config, logger, clientProxyConfig)
+		if err != nil {
+			log.Fatal(err)
+		}
+		servers = append(servers, namedServer{
 			name: "reverse",
 			server: &http.Server{
 				Addr:                         fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port),
 				Handler:                      reverseHandler,
 				DisableGeneralOptionsHandler: true,
 			},
-		},
+		})
 	}
 
 	if config.Proxy != nil {
@@ -274,13 +276,6 @@ func buildForwardProxy(config *ProxyConfig, globalLogger loggingproxy.Logger, cl
 	return proxy, nil
 }
 
-func defaultString(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
 func loadConfig(filename string) (*Config, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -292,11 +287,19 @@ func loadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 
-	if config.Server.Host == "" {
-		config.Server.Host = "localhost"
+	if config.Server == nil && len(config.Routes) > 0 {
+		return nil, fmt.Errorf("routes require a server section")
 	}
-	if config.Server.Port == 0 {
-		config.Server.Port = 5601
+	if config.Server == nil && config.Proxy == nil {
+		return nil, fmt.Errorf("configuration must include at least one of server or proxy")
+	}
+	if config.Server != nil {
+		if config.Server.Host == "" {
+			config.Server.Host = "localhost"
+		}
+		if config.Server.Port == 0 {
+			config.Server.Port = 5601
+		}
 	}
 	if config.Proxy != nil {
 		if config.Proxy.Host == "" {
