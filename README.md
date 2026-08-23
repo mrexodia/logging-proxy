@@ -199,6 +199,26 @@ Captured files:
 
 For MITM HTTPS requests, the `.bin` files contain decrypted HTTP headers and bodies.
 
+## Library integrations and live dashboards
+
+The proxy can be embedded as a Go library with `NewProxyServer` or
+`NewHTTPProxyServer`. Implement `Logger` to consume each request and response
+stream as it arrives. This is sufficient to build a live event hub that stores
+traffic, publishes lifecycle events, and forwards body chunks to dashboard
+clients over SSE.
+
+A dashboard logger should not write directly to every SSE client from
+`LogRequest` or `LogResponse`: use bounded per-subscriber channels and disconnect
+or drop updates for slow subscribers so a browser cannot backpressure proxied
+traffic. If disk logging and live events are both required, one logger should
+consume the proxy stream once and fan chunks out internally; two independent
+loggers cannot both read the same stream.
+
+Custom loggers are capture-enabled by default. A logger that implements
+`CaptureController` and returns `false` is removed from the request hot path
+entirely. `NoOpLogger` does this automatically, so disabling logging avoids
+capture pipes, header reconstruction, and logging goroutines.
+
 ## Reverse proxy route matching
 
 Routes use Go `http.ServeMux` patterns.

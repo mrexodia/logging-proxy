@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -157,6 +158,25 @@ type readCloser struct {
 	io.Closer
 }
 
+const proxyCopyBufferSize = 32 * 1024
+
+var proxyCopyBufferPool = sync.Pool{
+	New: func() any {
+		return new([proxyCopyBufferSize]byte)
+	},
+}
+
+func copyProxyStream(destination io.Writer, source io.Reader) (int64, error) {
+	buffer := proxyCopyBufferPool.Get().(*[proxyCopyBufferSize]byte)
+	defer proxyCopyBufferPool.Put(buffer)
+
+	// Hide optional ReaderFrom/WriterTo methods so io.CopyBuffer uses the
+	// supplied pooled buffer rather than allocating inside an optimized path.
+	writer := struct{ io.Writer }{Writer: destination}
+	reader := struct{ io.Reader }{Reader: source}
+	return io.CopyBuffer(writer, reader, buffer[:])
+}
+
 func shouldSkipLoggedRequestHeader(name string) bool {
 	return strings.EqualFold(name, "Host") ||
 		strings.EqualFold(name, "Content-Encoding") ||
@@ -222,17 +242,7 @@ func decompressReader(r io.Reader, encoding string) (io.ReadCloser, error) {
 }
 
 func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request, destinationURL url.URL, logger Logger) {
-	// Capture request data
-	requestTime := time.Now()
-
-	// Construct the full source URL (incoming request)
-	scheme := "http"
-	if request.TLS != nil {
-		scheme = "https"
-	}
-	sourceURL := fmt.Sprintf("%s://%s%s", scheme, request.Host, request.URL.String())
-
-	// Construct the target URL
+	// Construct the target URL before deciding whether stream capture is needed.
 	path := request.PathValue("path")
 	if len(path) > 0 {
 		destinationURL = *destinationURL.JoinPath(path)
@@ -240,6 +250,20 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 	if len(request.URL.RawQuery) > 0 {
 		destinationURL.RawQuery = request.URL.RawQuery
 	}
+
+	if !loggerCaptureEnabled(logger) {
+		s.handleRequestWithoutLogging(w, request, destinationURL)
+		return
+	}
+
+	requestTime := time.Now()
+
+	// Construct the full source URL (incoming request).
+	scheme := "http"
+	if request.TLS != nil {
+		scheme = "https"
+	}
+	sourceURL := fmt.Sprintf("%s://%s%s", scheme, request.Host, request.URL.String())
 
 	// Capture request Content-Encoding before modifying the request
 	requestContentEncoding := request.Header.Get("Content-Encoding")
@@ -393,9 +417,30 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		})
 	}()
 
-	// Stream the response body (no error checking, because we already wrote the response)
-	io.Copy(w, responseBody)
+	// Stream the response body (no error checking, because we already wrote the response).
+	_, _ = copyProxyStream(w, responseBody)
 
-	// Close the response writer now that response body has been consumed
+	// Close the response writer now that response body has been consumed.
 	responseLogWriter.Close()
+}
+
+func (s *ProxyServer) handleRequestWithoutLogging(w http.ResponseWriter, request *http.Request, destinationURL url.URL) {
+	request.URL = &destinationURL
+	request.Host = destinationURL.Host
+	request.RequestURI = ""
+
+	response, err := s.client.Do(request)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("proxy request failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+
+	for key, values := range response.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(response.StatusCode)
+	_, _ = copyProxyStream(w, response.Body)
 }

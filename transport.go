@@ -10,6 +10,13 @@ import (
 	"golang.org/x/net/http/httpproxy"
 )
 
+const (
+	// The net/http default only retains two idle connections per host, which
+	// causes severe connection churn for concurrent traffic to one API backend.
+	defaultMaxIdleConns        = 256
+	defaultMaxIdleConnsPerHost = 64
+)
+
 // HTTPClientProxyEnvironment contains the effective process proxy settings.
 type HTTPClientProxyEnvironment struct {
 	HTTPProxy  string
@@ -70,13 +77,17 @@ func newDirectHTTPClient() *http.Client {
 }
 
 func cloneDefaultTransport() *http.Transport {
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
-		clone := transport.Clone()
-		clone.Proxy = nil
-		return clone
+	var transport *http.Transport
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		transport = &http.Transport{}
 	}
 
-	return &http.Transport{Proxy: nil}
+	transport.Proxy = nil
+	transport.MaxIdleConns = defaultMaxIdleConns
+	transport.MaxIdleConnsPerHost = defaultMaxIdleConnsPerHost
+	return transport
 }
 
 func (config HTTPClientProxyConfig) proxyFunc() (func(*http.Request) (*url.URL, error), error) {

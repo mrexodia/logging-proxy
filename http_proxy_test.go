@@ -122,6 +122,47 @@ func TestHTTPProxyServerForwardsHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyServerBypassesDisabledCaptureLogger(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("failed to read backend request: %v", err)
+			return
+		}
+		fmt.Fprintf(w, "received %s", body)
+	}))
+	defer backend.Close()
+
+	logger := &disabledTestLogger{}
+	proxyHandler, err := NewHTTPProxyServer(HTTPProxyOptions{Logger: logger})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	client := newProxyClient(t, proxy.URL, nil)
+	request, err := http.NewRequest(http.MethodPost, backend.URL+"/test", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	if string(body) != "received payload" {
+		t.Fatalf("response = %q, want %q", body, "received payload")
+	}
+	if calls := logger.calls.Load(); calls != 0 {
+		t.Fatalf("disabled logger received %d stream calls", calls)
+	}
+}
+
 func TestHTTPProxyServerRequiresBasicAuthForHTTPRequests(t *testing.T) {
 	seenProxyAuthorization := make(chan string, 1)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

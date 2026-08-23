@@ -166,8 +166,14 @@ func NewHTTPProxyServer(options HTTPProxyOptions) (*HTTPProxyServer, error) {
 		}))
 	}
 
-	proxy.OnRequest().DoFunc(server.handleRequest)
-	proxy.OnResponse().DoFunc(server.handleResponse)
+	if loggerCaptureEnabled(logger) {
+		proxy.OnRequest().DoFunc(server.handleRequest)
+		proxy.OnResponse().DoFunc(server.handleResponse)
+	} else if options.MITM {
+		// Even without capture, goproxy's MITM response must be normalized to
+		// the HTTP version used by the client-side TLS connection.
+		proxy.OnResponse().DoFunc(server.handleResponse)
+	}
 
 	return server, nil
 }
@@ -482,6 +488,18 @@ func (s *HTTPProxyServer) handleResponse(response *http.Response, ctx *goproxy.P
 		return response
 	}
 
+	upstreamProto := response.Proto
+	// goproxy's MITM path serializes the upstream *http.Response with
+	// response.Write(client). If the upstream connection used HTTP/2, leaving
+	// response.Proto as HTTP/2.0 would write an invalid HTTP/2 status line (and
+	// even Transfer-Encoding: chunked) onto the MITM client's HTTP/1.x TLS stream.
+	// This correction is required even when stream capture is disabled.
+	if s.mitmEnabled && ctx != nil && ctx.Req != nil && ctx.Req.URL != nil && strings.EqualFold(ctx.Req.URL.Scheme, "https") {
+		response.Proto = ctx.Req.Proto
+		response.ProtoMajor = ctx.Req.ProtoMajor
+		response.ProtoMinor = ctx.Req.ProtoMinor
+	}
+
 	state, ok := ctx.UserData.(*httpProxyRequestState)
 	if !ok || state == nil {
 		return response
@@ -491,20 +509,7 @@ func (s *HTTPProxyServer) handleResponse(response *http.Response, ctx *goproxy.P
 	responseTime := time.Now()
 	responseHeaders := response.Header.Clone()
 	responseContentEncoding := responseHeaders.Get("Content-Encoding")
-	upstreamProto := response.Proto
 	metadata.ResponseContentEncoding = responseContentEncoding
-
-	// goproxy's MITM path serializes the upstream *http.Response with
-	// response.Write(client). If the upstream connection used HTTP/2, leaving
-	// response.Proto as HTTP/2.0 would write an invalid HTTP/2 status line (and
-	// even Transfer-Encoding: chunked) onto the MITM client's HTTP/1.x TLS stream.
-	// Preserve the upstream protocol in the log, but make the response written to
-	// the client match the protocol used by that client request.
-	if ctx != nil && ctx.Req != nil && strings.EqualFold(metadata.Pattern, "HTTP_PROXY_MITM") {
-		response.Proto = ctx.Req.Proto
-		response.ProtoMajor = ctx.Req.ProtoMajor
-		response.ProtoMinor = ctx.Req.ProtoMinor
-	}
 
 	response.Body = wrapBodyForLogging(response.Body, func(body io.ReadCloser) {
 		s.logHTTPProxyResponse(metadata, responseTime, upstreamProto, response.Status, responseHeaders, responseContentEncoding, body)

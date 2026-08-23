@@ -71,6 +71,42 @@ func TestNewArchitecture(t *testing.T) {
 	// Test verifies that the proxy correctly forwards requests to the backend
 }
 
+func TestReverseProxyBypassesDisabledCaptureLogger(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("failed to read backend request: %v", err)
+			return
+		}
+		fmt.Fprintf(w, "received %s", body)
+	}))
+	defer backend.Close()
+
+	logger := &disabledTestLogger{}
+	proxy := NewProxyServer("")
+	if err := proxy.AddRoute("/api/", backend.URL+"/", logger); err != nil {
+		t.Fatalf("failed to add route: %v", err)
+	}
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/api/test", "text/plain", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	if string(body) != "received payload" {
+		t.Fatalf("response = %q, want %q", body, "received payload")
+	}
+	if calls := logger.calls.Load(); calls != 0 {
+		t.Fatalf("disabled logger received %d stream calls", calls)
+	}
+}
+
 func TestRouteAuthorizationInjectsBackendCredential(t *testing.T) {
 	backendHeader := make(chan string, 1)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

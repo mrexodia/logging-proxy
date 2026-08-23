@@ -35,8 +35,34 @@ type ConnectLogger interface {
 	LogConnect(metadata RequestMetadata, timestamp time.Time)
 }
 
-// NoOpLogger is a logger that does nothing (for when logging is disabled)
+// CaptureController is optionally implemented by a Logger to disable stream
+// capture entirely. Loggers that do not implement it are capture-enabled by
+// default, preserving compatibility with custom library integrations.
+//
+// A disabled logger is kept off the proxy hot path: request/response pipes,
+// header reconstruction, and logging goroutines are not created.
+type CaptureController interface {
+	CaptureEnabled() bool
+}
+
+func loggerCaptureEnabled(logger Logger) bool {
+	if logger == nil {
+		return false
+	}
+	if controller, ok := logger.(CaptureController); ok {
+		return controller.CaptureEnabled()
+	}
+	return true
+}
+
+// NoOpLogger is a logger that disables stream capture.
 type NoOpLogger struct{}
+
+// CaptureEnabled lets proxy handlers bypass all logging machinery when a
+// NoOpLogger is configured.
+func (n *NoOpLogger) CaptureEnabled() bool {
+	return false
+}
 
 func (n *NoOpLogger) LogRequest(metadata RequestMetadata, timestamp time.Time, rawRequestStream io.ReadCloser) {
 	// Must consume the stream to avoid blocking the TeeReader

@@ -20,6 +20,16 @@ func TestHTTPClientProxyConfigCanDisableEnvironment(t *testing.T) {
 	}
 }
 
+func TestHTTPTransportUsesConcurrencyFriendlyIdlePool(t *testing.T) {
+	transport := cloneDefaultTransport()
+	if transport.MaxIdleConns != defaultMaxIdleConns {
+		t.Fatalf("MaxIdleConns = %d, want %d", transport.MaxIdleConns, defaultMaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != defaultMaxIdleConnsPerHost {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", transport.MaxIdleConnsPerHost, defaultMaxIdleConnsPerHost)
+	}
+}
+
 func clearProxyEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
