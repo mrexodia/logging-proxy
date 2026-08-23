@@ -194,25 +194,25 @@ Logs are written to `logging.log_dir`.
 Captured files:
 - `*_request.bin`
 - `*_response.bin`
-- `*_request_metadata.json`
-- `*_response_metadata.json`
+- `*_metadata.jsonl`
+
+Each request/response transaction has one append-only metadata JSONL. It records
+`request_started`, `request_completed`, `response_started`, and
+`response_completed` events as they happen. Request and response events may
+interleave according to their actual completion order. Every line is a complete
+JSON object, so filesystem watchers can tail complete lines while a request is
+still active; after a crash, an unmatched `*_started` event identifies an
+incomplete stream.
 
 For MITM HTTPS requests, the `.bin` files contain decrypted HTTP headers and bodies.
 
-## Library integrations and live dashboards
+## Library integrations
 
 The proxy can be embedded as a Go library with `NewProxyServer` or
 `NewHTTPProxyServer`. Implement `Logger` to consume each request and response
-stream as it arrives. This is sufficient to build a live event hub that stores
-traffic, publishes lifecycle events, and forwards body chunks to dashboard
-clients over SSE.
-
-A dashboard logger should not write directly to every SSE client from
-`LogRequest` or `LogResponse`: use bounded per-subscriber channels and disconnect
-or drop updates for slow subscribers so a browser cannot backpressure proxied
-traffic. If disk logging and live events are both required, one logger should
-consume the proxy stream once and fan chunks out internally; two independent
-loggers cannot both read the same stream.
+stream as it arrives. This leaves room for future in-memory observers or live
+streaming integrations without tying them to the on-disk format. Alternatively,
+external tools can watch the metadata JSONL and growing `.bin` files.
 
 Custom loggers are capture-enabled by default. A logger that implements
 `CaptureController` and returns `false` is removed from the request hot path

@@ -471,6 +471,7 @@ func (s *HTTPProxyServer) handleRequest(request *http.Request, ctx *goproxy.Prox
 		Method:                 request.Method,
 		SourceURL:              targetURL.String(),
 		DestinationURL:         targetURL.String(),
+		RequestStartedAt:       requestTime,
 		RequestContentEncoding: requestContentEncoding,
 	}
 	ctx.UserData = &httpProxyRequestState{metadata: metadata, requestTime: requestTime}
@@ -509,6 +510,10 @@ func (s *HTTPProxyServer) handleResponse(response *http.Response, ctx *goproxy.P
 	responseTime := time.Now()
 	responseHeaders := response.Header.Clone()
 	responseContentEncoding := responseHeaders.Get("Content-Encoding")
+	metadata.UpstreamResponseAt = &responseTime
+	metadata.UpstreamHeaderDurationMS = responseTime.Sub(state.requestTime).Milliseconds()
+	metadata.ResponseStatus = response.Status
+	metadata.ResponseStatusCode = response.StatusCode
 	metadata.ResponseContentEncoding = responseContentEncoding
 
 	response.Body = wrapBodyForLogging(response.Body, func(body io.ReadCloser) {

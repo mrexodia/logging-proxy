@@ -2,23 +2,26 @@ package loggingproxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
-// FileLogger implements the Logger interface and writes logs to files
+// FileLogger implements the Logger interface and writes logs to files.
 type FileLogger struct {
 	LogDir  string
 	Console bool
+
+	metadataMu sync.Mutex
 }
 
-// NewFileLogger creates a new file-based logger
+// NewFileLogger creates a new file-based logger.
 func NewFileLogger(logDir string, console bool) (*FileLogger, error) {
-	// Ensure log directory exists
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
@@ -29,12 +32,12 @@ func NewFileLogger(logDir string, console bool) (*FileLogger, error) {
 	}, nil
 }
 
-// LogRequest logs a request with its metadata and raw HTTP stream to a file
+// LogRequest logs a request with its metadata and raw HTTP stream to a file.
 func (f *FileLogger) LogRequest(metadata RequestMetadata, timestamp time.Time, rawRequestStream io.ReadCloser) {
 	f.logRawStream(metadata, timestamp, rawRequestStream, "request")
 }
 
-// LogResponse logs a response with its metadata and raw HTTP stream to a file
+// LogResponse logs a response with its metadata and raw HTTP stream to a file.
 func (f *FileLogger) LogResponse(metadata RequestMetadata, timestamp time.Time, rawResponseStream io.ReadCloser) {
 	f.logRawStream(metadata, timestamp, rawResponseStream, "response")
 }
@@ -47,7 +50,11 @@ func (f *FileLogger) LogConnect(metadata RequestMetadata, _ time.Time) {
 	log.Printf("[connect] %s: %s", shortMetadataID(metadata), formatConsoleRequest(metadata))
 }
 
-type fileLogMetadata struct {
+// fileLogEvent is one line in a transaction's metadata JSONL. Request and
+// response events share a file and may interleave according to their actual
+// completion order.
+type fileLogEvent struct {
+	Event        string          `json:"event"`
 	StreamType   string          `json:"stream_type"`
 	Metadata     RequestMetadata `json:"metadata"`
 	Timestamp    time.Time       `json:"timestamp"`
@@ -60,7 +67,8 @@ type fileLogMetadata struct {
 	Filename     string          `json:"filename"`
 }
 
-// logRawStream handles the common logic for logging raw HTTP streams
+// logRawStream writes one request or response body and appends lifecycle events
+// to the transaction-level metadata JSONL.
 func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time, rawStream io.ReadCloser, streamType string) {
 	defer rawStream.Close()
 
@@ -68,51 +76,105 @@ func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time,
 	metadataID := shortMetadataID(metadata)
 	filename := fmt.Sprintf("%s_%s_%s.bin", timestampStr, metadataID, streamType)
 	filePath := filepath.Join(f.LogDir, filename)
-	metadataFilename := fmt.Sprintf("%s_%s_%s_metadata.json", timestampStr, metadataID, streamType)
-	metadataPath := filepath.Join(f.LogDir, metadataFilename)
+	metadataPath := filepath.Join(f.LogDir, transactionMetadataFilename(metadata, timestamp))
 
-	logMetadata := fileLogMetadata{
+	metadataFile, metadataErr := os.OpenFile(metadataPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if metadataErr != nil {
+		log.Printf("[error] Failed to open metadata file %s: %v\n", metadataPath, metadataErr)
+	}
+	defer func() {
+		if metadataFile != nil {
+			if err := metadataFile.Close(); err != nil {
+				log.Printf("[error] Failed to close metadata file %s: %v\n", metadataPath, err)
+			}
+		}
+	}()
+
+	startedEvent := fileLogEvent{
+		Event:      streamType + "_started",
 		StreamType: streamType,
 		Metadata:   metadata,
 		Timestamp:  timestamp,
 		StartedAt:  timestamp,
 		Filename:   filename,
 	}
+	f.appendMetadataEvent(metadataFile, metadataPath, startedEvent)
 
-	// Write an initial metadata record before consuming the stream. If a stream hangs,
-	// the metadata file still exists and shows completed=false.
-	f.writeMetadata(metadataPath, logMetadata)
-
-	// Create the log file
-	// The initial metadata was already written so incomplete streams are visible.
-	logFile, err := os.Create(filePath)
-	if err != nil {
-		logMetadata.Error = fmt.Sprintf("failed to create log file: %v", err)
-		f.writeMetadata(metadataPath, logMetadata)
-		log.Printf("[error] Failed to create log file %s: %v\n", filePath, err)
+	logFile, createErr := os.Create(filePath)
+	if createErr != nil {
+		// Keep consuming the pipe so a logging-side filesystem failure does not
+		// break or stall the proxied request.
+		_, _ = io.Copy(io.Discard, rawStream)
+		completedAt := time.Now()
+		completedEvent := startedEvent
+		completedEvent.Event = streamType + "_completed"
+		completedEvent.Timestamp = completedAt
+		completedEvent.CompletedAt = &completedAt
+		completedEvent.DurationMS = completedAt.Sub(timestamp).Milliseconds()
+		completedEvent.Error = fmt.Sprintf("failed to create log file: %v", createErr)
+		f.appendMetadataEvent(metadataFile, metadataPath, completedEvent)
+		log.Printf("[error] Failed to create log file %s: %v\n", filePath, createErr)
 		return
 	}
-	defer logFile.Close()
 
-	// Write raw HTTP stream (headers + body already combined)
-	bytesWritten, err := io.Copy(logFile, rawStream)
+	bytesWritten, copyErr := io.Copy(logFile, rawStream)
+	closeErr := logFile.Close()
+	streamErr := errors.Join(copyErr, closeErr)
 	completedAt := time.Now()
-	logMetadata.CompletedAt = &completedAt
-	logMetadata.DurationMS = completedAt.Sub(timestamp).Milliseconds()
-	logMetadata.BytesWritten = bytesWritten
-	logMetadata.Completed = err == nil
-	if err != nil {
-		logMetadata.Error = err.Error()
-		log.Printf("[error] Failed to write raw HTTP stream: %v\n", err)
+	completedEvent := startedEvent
+	completedEvent.Event = streamType + "_completed"
+	completedEvent.Timestamp = completedAt
+	completedEvent.CompletedAt = &completedAt
+	completedEvent.DurationMS = completedAt.Sub(timestamp).Milliseconds()
+	completedEvent.BytesWritten = bytesWritten
+	completedEvent.Completed = streamErr == nil
+	if streamErr != nil {
+		completedEvent.Error = streamErr.Error()
+		log.Printf("[error] Failed to write raw HTTP stream: %v\n", streamErr)
 	}
-
-	// Create and save metadata
-	// Rewrite it with completion status, byte count, and duration.
-	f.writeMetadata(metadataPath, logMetadata)
+	f.appendMetadataEvent(metadataFile, metadataPath, completedEvent)
 
 	if f.Console {
 		log.Printf("[%s] %s: %s", streamType, metadataID, formatConsoleRequest(metadata))
 		log.Printf("[%s] %s: %d bytes saved to %s", streamType, metadataID, bytesWritten, filename)
+	}
+}
+
+func transactionMetadataFilename(metadata RequestMetadata, fallback time.Time) string {
+	startedAt := metadata.RequestStartedAt
+	if startedAt.IsZero() {
+		startedAt = fallback
+	}
+	return fmt.Sprintf("%s_%s_metadata.jsonl", startedAt.Format("2006-01-02_15-04-05.000"), shortMetadataID(metadata))
+}
+
+func (f *FileLogger) appendMetadataEvent(metadataFile *os.File, metadataPath string, event fileLogEvent) {
+	if metadataFile == nil {
+		return
+	}
+
+	data, err := json.Marshal(event)
+	if err != nil {
+		log.Printf("[error] Failed to encode metadata event for %s: %v\n", metadataPath, err)
+		return
+	}
+	data = append(data, '\n')
+
+	// Request and response loggers may hold separate append handles for the same
+	// transaction. Serialize each complete JSON line so they cannot interleave.
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	for len(data) > 0 {
+		written, writeErr := metadataFile.Write(data)
+		if writeErr != nil {
+			log.Printf("[error] Failed to append metadata event to %s: %v\n", metadataPath, writeErr)
+			return
+		}
+		if written == 0 {
+			log.Printf("[error] Failed to append metadata event to %s: short write\n", metadataPath)
+			return
+		}
+		data = data[written:]
 	}
 }
 
@@ -128,32 +190,4 @@ func formatConsoleRequest(metadata RequestMetadata) string {
 		return fmt.Sprintf("%s %s", metadata.Method, metadata.SourceURL)
 	}
 	return fmt.Sprintf("%s %s -> %s", metadata.Method, metadata.SourceURL, metadata.DestinationURL)
-}
-
-func (f *FileLogger) writeMetadata(metadataPath string, logMetadata fileLogMetadata) {
-	// Replace metadata atomically so readers never observe partial JSON.
-	tmpFile, err := os.CreateTemp(filepath.Dir(metadataPath), "."+filepath.Base(metadataPath)+".*.tmp")
-	if err != nil {
-		log.Printf("[error] Failed to create metadata file %s: %v\n", metadataPath, err)
-		return
-	}
-	tmpPath := tmpFile.Name()
-
-	encoder := json.NewEncoder(tmpFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(logMetadata); err != nil {
-		log.Printf("[error] Failed to write metadata file %s: %v\n", metadataPath, err)
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return
-	}
-	if err := tmpFile.Close(); err != nil {
-		log.Printf("[error] Failed to close metadata file %s: %v\n", metadataPath, err)
-		os.Remove(tmpPath)
-		return
-	}
-	if err := os.Rename(tmpPath, metadataPath); err != nil {
-		log.Printf("[error] Failed to replace metadata file %s: %v\n", metadataPath, err)
-		os.Remove(tmpPath)
-	}
 }

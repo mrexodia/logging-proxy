@@ -293,6 +293,13 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 	request.Host = destinationURL.Host
 	request.RequestURI = "" // Must be empty in a client request
 
+	// Snapshot the outgoing request values before the client transport and
+	// response path can mutate them.
+	requestMetadata := metadata
+	requestMethod := request.Method
+	requestProtocol := request.Proto
+	requestHeaders := request.Header.Clone()
+
 	// Async request logging with header reconstruction (log the outgoing proxy request)
 	go func() {
 		defer requestLogReader.Close()
@@ -301,10 +308,10 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		var headerBuf bytes.Buffer
 
 		// Write request line with full destination URL
-		fmt.Fprintf(&headerBuf, "%s %s %s\r\n", request.Method, destinationURL.String(), request.Proto)
+		fmt.Fprintf(&headerBuf, "%s %s %s\r\n", requestMethod, destinationURL.String(), requestProtocol)
 
 		// Write remaining headers, excluding hop-by-hop proxy auth and decompressed encoding headers.
-		for name, values := range request.Header {
+		for name, values := range requestHeaders {
 			if shouldSkipLoggedRequestHeader(name) {
 				continue
 			}
@@ -330,7 +337,7 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		}
 
 		// Combine headers + body
-		logger.LogRequest(metadata, requestTime, &readCloser{
+		logger.LogRequest(requestMetadata, requestTime, &readCloser{
 			Reader: io.MultiReader(&headerBuf, bodyReader),
 			Closer: io.NopCloser(nil), // The pipe closer is already deferred
 		})

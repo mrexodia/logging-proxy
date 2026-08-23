@@ -1,10 +1,14 @@
 package loggingproxy
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,114 +41,210 @@ func TestFormatConsoleRequestKeepsDifferentDestination(t *testing.T) {
 	}
 }
 
-func TestFileLogging(t *testing.T) {
-	// Create a temporary directory for logging
-	logDir := "test_logs"
-	os.RemoveAll(logDir)       // Clean up any existing logs
-	defer os.RemoveAll(logDir) // Clean up after test
-
-	// Create file logger
+func TestFileLoggingUsesOneTransactionMetadataJSONL(t *testing.T) {
+	logDir := t.TempDir()
 	fileLogger, err := NewFileLogger(logDir, false)
 	if err != nil {
-		t.Fatalf("Failed to create file logger: %v", err)
+		t.Fatalf("failed to create file logger: %v", err)
 	}
 
-	// Create mock backend server
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "Hello from backend", "path": "` + r.URL.Path + `"}`))
+		_, _ = fmt.Fprintf(w, `{"message":"ok","path":%q}`, request.URL.Path)
 	}))
 	defer backend.Close()
 
-	// Create proxy server with file logging
 	server := NewProxyServer("")
-	err = server.AddRoute("/api/", backend.URL+"/", fileLogger)
+	if err := server.AddRoute("/api/", backend.URL+"/", fileLogger); err != nil {
+		t.Fatalf("failed to add route: %v", err)
+	}
+	proxy := httptest.NewServer(server)
+	defer proxy.Close()
+
+	response, err := http.Post(proxy.URL+"/api/test", "application/json", strings.NewReader(`{"test":"data"}`))
 	if err != nil {
-		t.Fatalf("Failed to add route: %v", err)
+		t.Fatalf("request failed: %v", err)
+	}
+	_, readErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("failed to consume response: read=%v close=%v", readErr, closeErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
 	}
 
-	// Create test server for proxy
-	testServer := httptest.NewServer(server)
-	defer testServer.Close()
+	metadataPath, events := waitForFileLogEvents(t, logDir, 4)
+	if filepath.Ext(metadataPath) != ".jsonl" {
+		t.Fatalf("metadata path = %q, want .jsonl", metadataPath)
+	}
 
-	// Make a test request
-	requestBody := `{"test": "data"}`
-	resp, err := http.Post(testServer.URL+"/api/test", "application/json", strings.NewReader(requestBody))
+	wantEvents := map[string]bool{
+		"request_started":    false,
+		"request_completed":  false,
+		"response_started":   false,
+		"response_completed": false,
+	}
+	var transactionID string
+	for _, event := range events {
+		if _, ok := wantEvents[event.Event]; !ok {
+			t.Fatalf("unexpected metadata event %q", event.Event)
+		}
+		if wantEvents[event.Event] {
+			t.Fatalf("duplicate metadata event %q", event.Event)
+		}
+		wantEvents[event.Event] = true
+		if transactionID == "" {
+			transactionID = event.Metadata.ID
+		} else if event.Metadata.ID != transactionID {
+			t.Fatalf("event %q ID = %q, want %q", event.Event, event.Metadata.ID, transactionID)
+		}
+		if event.Filename == "" {
+			t.Fatalf("event %q has no body filename", event.Event)
+		}
+		if strings.HasSuffix(event.Event, "_started") && event.Completed {
+			t.Fatalf("started event %q is marked completed", event.Event)
+		}
+		if strings.HasSuffix(event.Event, "_completed") {
+			if !event.Completed {
+				t.Fatalf("completed event %q has error %q", event.Event, event.Error)
+			}
+			if event.CompletedAt == nil || event.BytesWritten == 0 {
+				t.Fatalf("completed event %q is missing completion data", event.Event)
+			}
+		}
+		if strings.HasPrefix(event.Event, "response_") && event.Metadata.ResponseStatusCode != http.StatusOK {
+			t.Fatalf("response event status = %d, want 200", event.Metadata.ResponseStatusCode)
+		}
+	}
+	for event, found := range wantEvents {
+		if !found {
+			t.Fatalf("missing metadata event %q", event)
+		}
+	}
+
+	entries, err := os.ReadDir(logDir)
 	if err != nil {
-		t.Fatalf("Request failed: %v", err)
+		t.Fatalf("failed to read log directory: %v", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", resp.StatusCode)
-	}
-
-	// Give logging goroutines time to complete
-	time.Sleep(100 * time.Millisecond)
-
-	// Check if files were created
-	files, err := os.ReadDir(logDir)
-	if err != nil {
-		t.Fatalf("Failed to read log directory: %v", err)
-	}
-
-	t.Logf("Files created in %s:", logDir)
-	for _, file := range files {
-		t.Logf("- %s", file.Name())
-	}
-
-	// Verify we have both request and response files + metadata
-	requestFiles := 0
-	responseFiles := 0
-	metadataFiles := 0
-
-	for _, file := range files {
-		if strings.Contains(file.Name(), "request.bin") {
+	requestFiles, responseFiles, metadataFiles := 0, 0, 0
+	for _, entry := range entries {
+		switch {
+		case strings.HasSuffix(entry.Name(), "_request.bin"):
 			requestFiles++
-		}
-		if strings.Contains(file.Name(), "response.bin") {
+		case strings.HasSuffix(entry.Name(), "_response.bin"):
 			responseFiles++
-		}
-		if strings.Contains(file.Name(), "metadata.json") {
+		case strings.HasSuffix(entry.Name(), "_metadata.jsonl"):
 			metadataFiles++
 		}
-	}
-
-	t.Logf("Summary:")
-	t.Logf("- Request .bin files: %d", requestFiles)
-	t.Logf("- Response .bin files: %d", responseFiles)
-	t.Logf("- Metadata .json files: %d", metadataFiles)
-
-	// Verify all expected files were created
-	if requestFiles != 1 {
-		t.Errorf("Expected 1 request file, got %d", requestFiles)
-	}
-	if responseFiles != 1 {
-		t.Errorf("Expected 1 response file, got %d", responseFiles)
-	}
-	if metadataFiles != 2 {
-		t.Errorf("Expected 2 metadata files, got %d", metadataFiles)
-	}
-
-	// Verify the files have content
-	for _, file := range files {
-		info, err := file.Info()
-		if err != nil {
-			t.Errorf("Failed to get file info for %s: %v", file.Name(), err)
-			continue
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			t.Fatalf("failed to inspect %s: %v", entry.Name(), infoErr)
 		}
 		if info.Size() == 0 {
-			t.Errorf("File %s is empty", file.Name())
+			t.Fatalf("file %s is empty", entry.Name())
 		}
+	}
+	if requestFiles != 1 || responseFiles != 1 || metadataFiles != 1 {
+		t.Fatalf("files: request=%d response=%d metadata=%d, want 1 each", requestFiles, responseFiles, metadataFiles)
 	}
 
-	// Delete the files to make sure no handles are left open
-	for _, file := range files {
-		filePath := path.Join(logDir, file.Name())
-		err := os.Remove(filePath)
-		if err != nil {
-			t.Errorf("Failed to delete file %s: %v", file.Name(), err)
+	// Completed logger calls must not leave file handles open.
+	for _, entry := range entries {
+		if err := os.Remove(filepath.Join(logDir, entry.Name())); err != nil {
+			t.Fatalf("failed to remove %s: %v", entry.Name(), err)
 		}
 	}
+}
+
+func TestFileLoggingPublishesStartedEventWhileStreamIsOpen(t *testing.T) {
+	logDir := t.TempDir()
+	fileLogger, err := NewFileLogger(logDir, false)
+	if err != nil {
+		t.Fatalf("failed to create file logger: %v", err)
+	}
+
+	startedAt := time.Now()
+	metadata := RequestMetadata{
+		ID:               "12345678-1234-1234-1234-123456789abc",
+		Pattern:          "/api/",
+		Method:           http.MethodPost,
+		SourceURL:        "http://proxy.test/api/",
+		DestinationURL:   "https://backend.test/",
+		RequestStartedAt: startedAt,
+	}
+	reader, writer := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		fileLogger.LogRequest(metadata, startedAt, reader)
+		close(done)
+	}()
+
+	_, events := waitForFileLogEvents(t, logDir, 1)
+	if len(events) != 1 || events[0].Event != "request_started" || events[0].Completed {
+		t.Fatalf("ongoing events = %#v, want one incomplete request_started", events)
+	}
+
+	if _, err := writer.Write([]byte("stream body")); err != nil {
+		t.Fatalf("failed to write stream: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("failed to close stream: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("logger did not finish")
+	}
+
+	_, events = waitForFileLogEvents(t, logDir, 2)
+	if events[1].Event != "request_completed" || !events[1].Completed {
+		t.Fatalf("final event = %#v, want completed request", events[1])
+	}
+}
+
+func waitForFileLogEvents(t *testing.T, logDir string, minimum int) (string, []fileLogEvent) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		matches, err := filepath.Glob(filepath.Join(logDir, "*_metadata.jsonl"))
+		if err != nil {
+			t.Fatalf("failed to find metadata: %v", err)
+		}
+		if len(matches) > 1 {
+			t.Fatalf("found %d transaction metadata files, want one", len(matches))
+		}
+		if len(matches) == 1 {
+			events, readErr := readFileLogEvents(matches[0])
+			if readErr == nil && len(events) >= minimum {
+				return matches[0], events
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d metadata events", minimum)
+	return "", nil
+}
+
+func readFileLogEvents(path string) ([]fileLogEvent, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var events []fileLogEvent
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event fileLogEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
