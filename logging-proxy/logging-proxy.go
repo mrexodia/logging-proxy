@@ -1,16 +1,21 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/joho/godotenv"
 	loggingproxy "github.com/mrexodia/logging-proxy"
+	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http/httpproxy"
 	"gopkg.in/yaml.v3"
 )
@@ -26,9 +31,19 @@ import (
 //
 // Logging defaults to logging.enabled unless explicitly overridden per-route.
 type Route struct {
-	Pattern     string `yaml:"pattern"`
-	Destination string `yaml:"destination"`
-	Logging     *bool  `yaml:"logging"`
+	Pattern       string               `yaml:"pattern"`
+	Destination   string               `yaml:"destination"`
+	Logging       *bool                `yaml:"logging"`
+	Authorization *AuthorizationConfig `yaml:"authorization"`
+}
+
+// AuthorizationConfig injects a backend credential and optionally requires a
+// different credential from clients of the local reverse proxy route.
+type AuthorizationConfig struct {
+	Header     string `yaml:"header"`
+	BackendKey string `yaml:"backend_key"`
+	Template   string `yaml:"template"`
+	ClientKey  string `yaml:"client_key"`
 }
 
 type ProxyAuthConfig struct {
@@ -432,7 +447,21 @@ func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger, clientP
 			log.Printf("  (warning) Pattern %q has no trailing '/'; will not match subpaths", route.Pattern)
 		}
 
-		if err := proxy.AddRoute(route.Pattern, route.Destination, logger); err != nil {
+		options := loggingproxy.RouteOptions{}
+		if route.Authorization != nil {
+			authorization := route.Authorization
+			options.Authorization = &loggingproxy.RouteAuthorization{
+				Header: authorization.Header,
+			}
+			if authorization.BackendKey != "" {
+				options.Authorization.BackendValue = renderAuthorizationValue(authorization.Template, authorization.BackendKey)
+			}
+			if authorization.ClientKey != "" {
+				options.Authorization.ClientValue = renderAuthorizationValue(authorization.Template, authorization.ClientKey)
+			}
+		}
+
+		if err := proxy.AddRouteWithOptions(route.Pattern, route.Destination, logger, options); err != nil {
 			return nil, fmt.Errorf("failed to add route %s: %w", route.Pattern, err)
 		}
 		if route.Pattern == "/" {
@@ -531,8 +560,103 @@ func crlHostname(configuredHostname, listenHost string, port int) (string, error
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
+var environmentReferencePattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+
+func renderAuthorizationValue(template, key string) string {
+	return strings.Replace(template, "{}", key, 1)
+}
+
+func readDotEnv(configFilename string) (map[string]string, error) {
+	dotEnvFilename := filepath.Join(filepath.Dir(configFilename), ".env")
+	environment, err := godotenv.Read(dotEnvFilename)
+	if err == nil {
+		return environment, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	return nil, fmt.Errorf("failed to read %s: %w", dotEnvFilename, err)
+}
+
+func resolveAuthorizationKey(value string, dotEnv map[string]string) (string, error) {
+	matches := environmentReferencePattern.FindStringSubmatch(value)
+	if matches == nil {
+		return value, nil
+	}
+
+	name := matches[1]
+	if resolved, ok := os.LookupEnv(name); ok {
+		if resolved == "" {
+			return "", fmt.Errorf("environment variable %s is empty", name)
+		}
+		return resolved, nil
+	}
+	if resolved, ok := dotEnv[name]; ok {
+		if resolved == "" {
+			return "", fmt.Errorf("environment variable %s is empty", name)
+		}
+		return resolved, nil
+	}
+	return "", fmt.Errorf("environment variable %s is not set", name)
+}
+
+func resolveRouteAuthorization(routeName string, authorization *AuthorizationConfig, dotEnv map[string]string) error {
+	if authorization == nil {
+		return nil
+	}
+
+	authorization.Header = strings.TrimSpace(authorization.Header)
+	if authorization.Header == "" {
+		authorization.Header = "Authorization"
+	}
+	if !httpguts.ValidHeaderFieldName(authorization.Header) {
+		return fmt.Errorf("route %s authorization header %q is invalid", routeName, authorization.Header)
+	}
+	if authorization.Template == "" {
+		if strings.EqualFold(authorization.Header, "Authorization") {
+			authorization.Template = "Bearer {}"
+		} else {
+			return fmt.Errorf("route %s authorization template is required for header %q", routeName, authorization.Header)
+		}
+	}
+	if strings.Count(authorization.Template, "{}") != 1 {
+		return fmt.Errorf("route %s authorization template must contain exactly one {} placeholder", routeName)
+	}
+
+	if authorization.BackendKey == "" && authorization.ClientKey == "" {
+		return fmt.Errorf("route %s authorization requires backend_key, client_key, or both", routeName)
+	}
+
+	var err error
+	if authorization.BackendKey != "" {
+		authorization.BackendKey, err = resolveAuthorizationKey(authorization.BackendKey, dotEnv)
+		if err != nil {
+			return fmt.Errorf("route %s authorization backend_key: %w", routeName, err)
+		}
+		if !httpguts.ValidHeaderFieldValue(renderAuthorizationValue(authorization.Template, authorization.BackendKey)) {
+			return fmt.Errorf("route %s authorization backend value is not a valid HTTP header value", routeName)
+		}
+	}
+
+	if authorization.ClientKey != "" {
+		authorization.ClientKey, err = resolveAuthorizationKey(authorization.ClientKey, dotEnv)
+		if err != nil {
+			return fmt.Errorf("route %s authorization client_key: %w", routeName, err)
+		}
+		if !httpguts.ValidHeaderFieldValue(renderAuthorizationValue(authorization.Template, authorization.ClientKey)) {
+			return fmt.Errorf("route %s authorization client value is not a valid HTTP header value", routeName)
+		}
+	}
+	return nil
+}
+
 func loadConfig(filename string) (*Config, error) {
 	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	dotEnv, err := readDotEnv(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -540,6 +664,13 @@ func loadConfig(filename string) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
+	}
+
+	for routeName, route := range config.Routes {
+		if err := resolveRouteAuthorization(routeName, route.Authorization, dotEnv); err != nil {
+			return nil, err
+		}
+		config.Routes[routeName] = route
 	}
 
 	if config.Server == nil && len(config.Routes) > 0 {

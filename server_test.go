@@ -71,6 +71,151 @@ func TestNewArchitecture(t *testing.T) {
 	// Test verifies that the proxy correctly forwards requests to the backend
 }
 
+func TestRouteAuthorizationInjectsBackendCredential(t *testing.T) {
+	backendHeader := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendHeader <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	proxy := NewProxyServer("")
+	err := proxy.AddRouteWithOptions("/api/", backend.URL+"/", &NoOpLogger{}, RouteOptions{
+		Authorization: &RouteAuthorization{
+			Header:       "Authorization",
+			BackendValue: "Bearer backend-secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to add authorized route: %v", err)
+	}
+
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/models", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer caller-value")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected response status %d", response.StatusCode)
+	}
+
+	if got := <-backendHeader; got != "Bearer backend-secret" {
+		t.Fatalf("backend Authorization = %q, want injected credential", got)
+	}
+}
+
+func TestRouteAuthorizationChecksClientCredential(t *testing.T) {
+	backendHeader := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendHeader <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	proxy := NewProxyServer("")
+	err := proxy.AddRouteWithOptions("/api/", backend.URL+"/", &NoOpLogger{}, RouteOptions{
+		Authorization: &RouteAuthorization{
+			Header:       "Authorization",
+			BackendValue: "Bearer backend-secret",
+			ClientValue:  "Bearer local-secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to add authorized route: %v", err)
+	}
+
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	for _, value := range []string{"", "Bearer wrong-secret"} {
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/api/models", nil)
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		if value != "" {
+			request.Header.Set("Authorization", value)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("credential %q returned %d, want 401", value, response.StatusCode)
+		}
+		select {
+		case got := <-backendHeader:
+			t.Fatalf("unauthorized request reached backend with header %q", got)
+		default:
+		}
+	}
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/models", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer local-secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("authorized request returned %d", response.StatusCode)
+	}
+	if got := <-backendHeader; got != "Bearer backend-secret" {
+		t.Fatalf("backend Authorization = %q, want injected credential", got)
+	}
+}
+
+func TestRouteAuthorizationClientOnlyStripsCredential(t *testing.T) {
+	backendHeader := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendHeader <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	proxy := NewProxyServer("")
+	err := proxy.AddRouteWithOptions("/api/", backend.URL+"/", &NoOpLogger{}, RouteOptions{
+		Authorization: &RouteAuthorization{
+			Header:      "Authorization",
+			ClientValue: "Bearer local-secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to add client-authorized route: %v", err)
+	}
+
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/models", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer local-secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("authorized request returned %d", response.StatusCode)
+	}
+	if got := <-backendHeader; got != "" {
+		t.Fatalf("client credential leaked to backend: %q", got)
+	}
+}
+
 func TestStreamingWithNewArchitecture(t *testing.T) {
 	// Create mock streaming backend
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

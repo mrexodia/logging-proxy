@@ -14,7 +14,23 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
+	"golang.org/x/net/http/httpguts"
 )
+
+// RouteAuthorization configures an optional client credential check and an
+// optional authorization value sent to the backend for a reverse proxy route.
+// When only ClientValue is set, the validated client header is removed before
+// forwarding.
+type RouteAuthorization struct {
+	Header       string
+	BackendValue string
+	ClientValue  string
+}
+
+// RouteOptions configures optional behavior for a reverse proxy route.
+type RouteOptions struct {
+	Authorization *RouteAuthorization
+}
 
 type ProxyServer struct {
 	mux    *http.ServeMux
@@ -58,6 +74,10 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ProxyServer) AddRoute(pattern string, destination string, logger Logger) error {
+	return s.AddRouteWithOptions(pattern, destination, logger, RouteOptions{})
+}
+
+func (s *ProxyServer) AddRouteWithOptions(pattern string, destination string, logger Logger, options RouteOptions) error {
 	// Make sure the pattern doesn't contain a wildcard
 	wildcardRegex := regexp.MustCompile(`{[a-zA-Z0-9_.]+`)
 	if wildcardRegex.MatchString(pattern) {
@@ -81,11 +101,55 @@ func (s *ProxyServer) AddRoute(pattern string, destination string, logger Logger
 		destinationURL.Path = "/"
 	}
 
+	authorization, err := validateRouteAuthorization(options.Authorization)
+	if err != nil {
+		return err
+	}
+
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		if authorization != nil {
+			if authorization.ClientValue != "" && r.Header.Get(authorization.Header) != authorization.ClientValue {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if authorization.BackendValue == "" {
+				r.Header.Del(authorization.Header)
+			} else {
+				if r.Header == nil {
+					r.Header = make(http.Header)
+				}
+				r.Header.Set(authorization.Header, authorization.BackendValue)
+			}
+		}
 		s.handleRequest(w, r, *destinationURL, logger)
 	})
 
 	return nil
+}
+
+func validateRouteAuthorization(authorization *RouteAuthorization) (*RouteAuthorization, error) {
+	if authorization == nil {
+		return nil, nil
+	}
+
+	validated := *authorization
+	validated.Header = strings.TrimSpace(validated.Header)
+	if validated.Header == "" {
+		validated.Header = "Authorization"
+	}
+	if !httpguts.ValidHeaderFieldName(validated.Header) {
+		return nil, fmt.Errorf("invalid authorization header name %q", validated.Header)
+	}
+	if validated.BackendValue == "" && validated.ClientValue == "" {
+		return nil, fmt.Errorf("authorization requires a backend value, a client value, or both")
+	}
+	if validated.BackendValue != "" && !httpguts.ValidHeaderFieldValue(validated.BackendValue) {
+		return nil, fmt.Errorf("authorization backend value is not a valid HTTP header value")
+	}
+	if validated.ClientValue != "" && !httpguts.ValidHeaderFieldValue(validated.ClientValue) {
+		return nil, fmt.Errorf("authorization client value is not a valid HTTP header value")
+	}
+	return &validated, nil
 }
 
 type readCloser struct {

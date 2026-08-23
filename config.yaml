@@ -55,6 +55,11 @@ routes:
   openrouter:
     pattern: "/openrouter/"
     destination: "https://openrouter.ai/api/v1/"
+    # authorization:
+    #   header: "Authorization"
+    #   backend_key: "${OPENROUTER_API_KEY}"
+    #   template: "Bearer {}"
+    #   client_key: "${LOCAL_PROXY_ACCESS_KEY}"
   openrouter_models:
     pattern: "/openrouter/models/"
     destination: "https://openrouter.ai/api/v1/models/"

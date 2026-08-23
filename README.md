@@ -37,6 +37,11 @@ routes:
   openrouter:
     pattern: "/openrouter/"
     destination: "https://openrouter.ai/api/v1/"
+    authorization:
+      backend_key: "${OPENROUTER_API_KEY}"
+      template: "Bearer {}"
+      # Optional: require a different credential from local clients.
+      # client_key: "${LOCAL_PROXY_ACCESS_KEY}"
   openrouter_models:
     pattern: "/openrouter/models/"
     destination: "https://openrouter.ai/api/v1/models/"
@@ -53,6 +58,39 @@ routes:
   llama.cpp:
     pattern: "/llama.cpp/"
     destination: "http://127.0.0.1:8080/v1/"
+```
+
+### Reverse proxy route authorization
+
+A route can inject an authorization credential into its backend requests:
+
+```yaml
+routes:
+  openrouter:
+    pattern: "/openrouter/"
+    destination: "https://openrouter.ai/api/v1/"
+    authorization:
+      header: "Authorization"                 # Default: Authorization
+      backend_key: "${OPENROUTER_API_KEY}"    # Optional if client_key is set
+      template: "Bearer {}"                    # Default for Authorization
+      client_key: "${LOCAL_PROXY_ACCESS_KEY}"  # Optional
+```
+
+Keys may be literal values or exact `${VARIABLE}` references. Variables are read from the process environment first, then from an optional `.env` file beside the selected config file. Existing process variables override `.env`; a referenced variable that is missing or empty causes startup to fail.
+
+For the `Authorization` header, `template` defaults to `Bearer {}`. Other header names require an explicit template such as `{}` for a raw API key. A template must contain exactly one literal `{}` and formats both keys. At least one key is required:
+
+- `backend_key` only: inject the formatted backend credential without authenticating local clients.
+- Both keys: validate the formatted client credential, then replace it with the backend credential.
+- `client_key` only: validate the formatted client credential, then remove that header before forwarding.
+
+A missing or incorrect client credential returns `401` without calling the backend. Outgoing request logs contain the authorization header actually sent upstream.
+
+Example `.env`:
+
+```dotenv
+OPENROUTER_API_KEY=sk-backend-secret
+LOCAL_PROXY_ACCESS_KEY=local-client-secret
 ```
 
 ## Outbound client proxy
