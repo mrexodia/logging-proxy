@@ -230,6 +230,23 @@ metadata versions without completion fields are treated as completed when their
 referenced `.bin` exists; an explicit `completed: false` remains an unmatched
 started event.
 
+The generated JSONL also preserves the source metadata's filesystem dates by
+default. Because two source files become one, it uses the earliest creation time
+(on Windows) and the latest modification/access time. Use
+`--no-preserve-file-times` to timestamp the JSONL at migration time instead.
+
+If an earlier migration already removed the legacy metadata, the dates can still
+be reconstructed from the JSONL lifecycle timestamps:
+
+```bash
+python scripts/migrate_metadata_jsonl.py logs --repair-file-times --dry-run
+python scripts/migrate_metadata_jsonl.py logs --repair-file-times
+```
+
+Repair mode uses the earliest started event as the creation time and the latest
+event as the modification/access time. Stop the proxy before repairing active
+JSONL files.
+
 ## Library integrations
 
 The proxy can be embedded as a Go library with `NewProxyServer` or

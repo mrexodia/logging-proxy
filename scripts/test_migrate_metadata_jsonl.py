@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -118,6 +119,84 @@ class MetadataMigrationTests(unittest.TestCase):
         self.assertEqual([event["event"] for event in events], ["request_started", "request_completed"])
         self.assertTrue(events[1]["completed"])
         self.assertEqual(events[1]["bytes_written"], len(b"legacy body"))
+
+    def test_preserves_merged_source_file_dates(self) -> None:
+        request = self.write_metadata(
+            "2026-08-23_15-00-00.100",
+            "feedface",
+            "request",
+            started_at="2026-08-23T15:00:00.100+02:00",
+            completed_at="2026-08-23T15:00:00.150+02:00",
+            completed=True,
+            body=b"request",
+        )
+        response = self.write_metadata(
+            "2026-08-23_15-00-00.200",
+            "feedface",
+            "response",
+            started_at="2026-08-23T15:00:00.200+02:00",
+            completed_at="2026-08-23T15:00:00.250+02:00",
+            completed=True,
+            body=b"response",
+        )
+        request_times = (1_600_000_001_000_000_000, 1_600_000_002_000_000_000)
+        response_times = (1_600_000_003_000_000_000, 1_600_000_004_000_000_000)
+        os.utime(request, ns=request_times)
+        os.utime(response, ns=response_times)
+        expected_creation = min(request.stat().st_ctime_ns, response.stat().st_ctime_ns)
+
+        result = migration.migrate(self.log_dir, dry_run=False, overwrite=False, delete_old=False)
+        self.assertEqual(result, 0)
+        destinations = list(self.log_dir.glob("*_metadata.jsonl"))
+        self.assertEqual(len(destinations), 1)
+        destination_stat = destinations[0].stat()
+        self.assertEqual(destination_stat.st_atime_ns, response_times[0])
+        self.assertEqual(destination_stat.st_mtime_ns, response_times[1])
+        if os.name == "nt":
+            self.assertEqual(destination_stat.st_ctime_ns, expected_creation)
+        self.read_jsonl()
+
+    def test_repairs_existing_jsonl_dates_from_events(self) -> None:
+        self.write_metadata(
+            "2026-08-23_15-00-00.100",
+            "cafebabe",
+            "request",
+            started_at="2026-08-23T15:00:00.1000001+02:00",
+            completed_at="2026-08-23T15:00:00.1500002+02:00",
+            completed=True,
+            body=b"request",
+        )
+        self.write_metadata(
+            "2026-08-23_15-00-00.200",
+            "cafebabe",
+            "response",
+            started_at="2026-08-23T15:00:00.2000003+02:00",
+            completed_at="2026-08-23T15:00:00.2500004+02:00",
+            completed=True,
+            body=b"response",
+        )
+        result = migration.migrate(
+            self.log_dir,
+            dry_run=False,
+            overwrite=False,
+            delete_old=True,
+            preserve_file_times=False,
+        )
+        self.assertEqual(result, 0)
+        destination = next(self.log_dir.glob("*_metadata.jsonl"))
+
+        result = migration.repair_jsonl_file_times(self.log_dir)
+        self.assertEqual(result, 0)
+        destination_stat = destination.stat()
+        self.assertEqual(
+            destination_stat.st_mtime_ns,
+            migration.epoch_ns_from_iso("2026-08-23T15:00:00.2500004+02:00"),
+        )
+        if os.name == "nt":
+            self.assertEqual(
+                destination_stat.st_ctime_ns,
+                migration.epoch_ns_from_iso("2026-08-23T15:00:00.1000001+02:00"),
+            )
 
     def test_preserves_explicit_incomplete_stream_as_unmatched_start(self) -> None:
         self.write_metadata(
