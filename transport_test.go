@@ -20,6 +20,64 @@ func TestHTTPClientProxyConfigCanDisableEnvironment(t *testing.T) {
 	}
 }
 
+func clearProxyEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"HTTP_PROXY", "http_proxy",
+		"HTTPS_PROXY", "https_proxy",
+		"ALL_PROXY", "all_proxy",
+		"NO_PROXY", "no_proxy",
+		"REQUEST_METHOD",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+func TestAllProxyFillsMissingSchemeSpecificProxies(t *testing.T) {
+	clearProxyEnvironment(t)
+	t.Setenv("ALL_PROXY", "socks5://proxy.example:1080")
+
+	environment := ReadHTTPClientProxyEnvironment()
+	if environment.HTTPProxy != "socks5://proxy.example:1080" {
+		t.Fatalf("HTTP proxy = %q, want ALL_PROXY fallback", environment.HTTPProxy)
+	}
+	if environment.HTTPSProxy != "socks5://proxy.example:1080" {
+		t.Fatalf("HTTPS proxy = %q, want ALL_PROXY fallback", environment.HTTPSProxy)
+	}
+}
+
+func TestSchemeSpecificProxyOverridesLowercaseAllProxy(t *testing.T) {
+	clearProxyEnvironment(t)
+	t.Setenv("HTTP_PROXY", "http://http-proxy.example:3128")
+	t.Setenv("all_proxy", "socks5://fallback.example:1080")
+
+	environment := ReadHTTPClientProxyEnvironment()
+	if environment.HTTPProxy != "http://http-proxy.example:3128" {
+		t.Fatalf("HTTP proxy = %q, want scheme-specific proxy", environment.HTTPProxy)
+	}
+	if environment.HTTPSProxy != "socks5://fallback.example:1080" {
+		t.Fatalf("HTTPS proxy = %q, want lowercase all_proxy fallback", environment.HTTPSProxy)
+	}
+}
+
+func TestAllProxyHonorsNoProxy(t *testing.T) {
+	clearProxyEnvironment(t)
+	t.Setenv("ALL_PROXY", "http://proxy.example:3128")
+	t.Setenv("NO_PROXY", "bypass.example")
+
+	request, err := http.NewRequest(http.MethodGet, "https://bypass.example/resource", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	proxyURL, err := proxyFromEnvironment(request)
+	if err != nil {
+		t.Fatalf("proxy lookup failed: %v", err)
+	}
+	if proxyURL != nil {
+		t.Fatalf("NO_PROXY destination selected proxy %q", proxyURL)
+	}
+}
+
 func TestReverseProxyUsesConfiguredHTTPClientProxy(t *testing.T) {
 	seenRequests := make(chan string, 1)
 	upstreamProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

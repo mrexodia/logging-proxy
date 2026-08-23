@@ -4,10 +4,29 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"golang.org/x/net/http/httpproxy"
 )
+
+// HTTPClientProxyEnvironment contains the effective process proxy settings.
+type HTTPClientProxyEnvironment struct {
+	HTTPProxy  string
+	HTTPSProxy string
+	NoProxy    string
+}
+
+// ReadHTTPClientProxyEnvironment returns the effective process proxy settings.
+// ALL_PROXY/all_proxy fills either scheme-specific proxy when it is unset.
+func ReadHTTPClientProxyEnvironment() HTTPClientProxyEnvironment {
+	config := proxyConfigFromEnvironment()
+	return HTTPClientProxyEnvironment{
+		HTTPProxy:  config.HTTPProxy,
+		HTTPSProxy: config.HTTPSProxy,
+		NoProxy:    config.NoProxy,
+	}
+}
 
 // HTTPClientProxyConfig configures the upstream proxy used by outbound HTTP clients.
 type HTTPClientProxyConfig struct {
@@ -15,7 +34,7 @@ type HTTPClientProxyConfig struct {
 	// If set, ProxyFromEnvironment is ignored.
 	ProxyURL string
 
-	// ProxyFromEnvironment enables HTTP_PROXY, HTTPS_PROXY, and NO_PROXY lookup.
+	// ProxyFromEnvironment enables HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, and NO_PROXY lookup.
 	// Nil defaults to true.
 	ProxyFromEnvironment *bool
 }
@@ -113,9 +132,30 @@ func parseProxyURL(rawProxyURL string) (*url.URL, error) {
 	}
 }
 
+func proxyConfigFromEnvironment() *httpproxy.Config {
+	config := httpproxy.FromEnvironment()
+	allProxy := firstEnvironmentValue("ALL_PROXY", "all_proxy")
+	if config.HTTPProxy == "" {
+		config.HTTPProxy = allProxy
+	}
+	if config.HTTPSProxy == "" {
+		config.HTTPSProxy = allProxy
+	}
+	return config
+}
+
+func firstEnvironmentValue(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func proxyFromEnvironment(request *http.Request) (*url.URL, error) {
 	if request == nil || request.URL == nil {
 		return nil, nil
 	}
-	return httpproxy.FromEnvironment().ProxyFunc()(request.URL)
+	return proxyConfigFromEnvironment().ProxyFunc()(request.URL)
 }

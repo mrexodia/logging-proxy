@@ -109,9 +109,9 @@ http_client:
   proxy_url: "socks5://127.0.0.1:1080"
 ```
 
-`proxy_url` overrides environment proxy variables. If `proxy_url` is empty, `proxy_from_environment` defaults to `true`, so `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (or their lowercase forms) from the logging-proxy process environment are honored. HTTP destinations use `HTTP_PROXY`, HTTPS destinations use `HTTPS_PROXY`, and `NO_PROXY` bypasses the selected proxy for matching destinations. Localhost and loopback destinations are always bypassed. These variables apply to outbound traffic from both reverse and forward proxy listeners and may contain `socks5://` or `socks5h://` URLs.
+`proxy_url` overrides environment proxy variables. If `proxy_url` is empty, `proxy_from_environment` defaults to `true`, so `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` (or their lowercase forms) from the logging-proxy process environment are honored. HTTP destinations use `HTTP_PROXY`, HTTPS destinations use `HTTPS_PROXY`, and `ALL_PROXY` fills either scheme-specific setting when it is absent. `NO_PROXY` bypasses the selected proxy for matching destinations. Localhost and loopback destinations are always bypassed. These variables apply to outbound traffic from both reverse and forward proxy listeners and may contain `socks5://` or `socks5h://` URLs.
 
-The adjacent `.env` file is used for explicit `${VARIABLE}` config references; it does not export `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY` into the process environment. An inherited proxy URL that points back to this logging-proxy process is rejected at startup to prevent a proxy loop. Set `proxy_from_environment` to `false` to force direct outbound connections:
+The adjacent `.env` file is used for explicit `${VARIABLE}` config references; it does not export `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY` into the process environment. An inherited proxy URL that points back to this logging-proxy process is rejected at startup to prevent a proxy loop. Set `proxy_from_environment` to `false` to force direct outbound connections:
 
 ```yaml
 http_client:

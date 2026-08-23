@@ -16,7 +16,6 @@ import (
 	"github.com/joho/godotenv"
 	loggingproxy "github.com/mrexodia/logging-proxy"
 	"golang.org/x/net/http/httpguts"
-	"golang.org/x/net/http/httpproxy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -218,7 +217,7 @@ func describeHTTPClientProxyConfig(config loggingproxy.HTTPClientProxyConfig) ([
 		return nil, "HTTP client proxy: disabled", nil
 	}
 
-	envConfig := httpproxy.FromEnvironment()
+	envConfig := loggingproxy.ReadHTTPClientProxyEnvironment()
 	endpoints := []httpClientProxyEndpoint{}
 	parts := []string{}
 	if strings.TrimSpace(envConfig.HTTPProxy) != "" {

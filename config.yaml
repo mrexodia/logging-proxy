@@ -11,7 +11,7 @@ logging:
 
 # Outbound client proxy used by reverse proxy routes and by the
 # optional forward proxy when it connects upstream.
-# By default, HTTP_PROXY, HTTPS_PROXY, and NO_PROXY are respected.
+# By default, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, and NO_PROXY are respected.
 # Set proxy_url to force a specific upstream proxy, or set
 # proxy_from_environment to false to force direct outbound connections.
 # proxy_url supports http://, https://, socks5://, and socks5h:// URLs.
@@ -76,3 +76,11 @@ routes:
   llama.cpp:
     pattern: "/llama.cpp/"
     destination: "http://127.0.0.1:8080/v1/"
+  deepseek:
+    pattern: "/deepseek/"
+    destination: "http://spark.ogilvie.lan:8888/v1/"
+  cerebras:
+    pattern: "/cerebras/"
+    destination: "https://api.cerebras.ai/v1/"
+    authorization:
+      backend_key: "${CEREBRAS_API_KEY}"
