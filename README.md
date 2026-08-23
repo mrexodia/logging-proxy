@@ -206,6 +206,30 @@ incomplete stream.
 
 For MITM HTTPS requests, the `.bin` files contain decrypted HTTP headers and bodies.
 
+### Migrating legacy metadata
+
+`scripts/migrate_metadata_jsonl.py` converts the previous per-stream
+`*_request_metadata.json` and `*_response_metadata.json` files into one
+transaction JSONL. Body `.bin` files are never modified. Stop the proxy or
+migrate a copy of the log directory so legacy metadata cannot change during the
+conversion.
+
+```bash
+# Validate and preview only.
+python scripts/migrate_metadata_jsonl.py logs --dry-run
+
+# Write JSONL while retaining the old metadata files (default).
+python scripts/migrate_metadata_jsonl.py logs
+
+# Remove old metadata JSON after each JSONL is written successfully.
+python scripts/migrate_metadata_jsonl.py logs --delete-old
+```
+
+Existing JSONL files are skipped unless `--overwrite` is supplied. Historical
+metadata versions without completion fields are treated as completed when their
+referenced `.bin` exists; an explicit `completed: false` remains an unmatched
+started event.
+
 ## Library integrations
 
 The proxy can be embedded as a Go library with `NewProxyServer` or

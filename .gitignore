@@ -21,8 +21,10 @@ coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
+# Dependency directories and language caches
 # vendor/
+__pycache__/
+*.py[cod]
 
 # Go workspace file
 go.work
