@@ -109,7 +109,9 @@ http_client:
   proxy_url: "socks5://127.0.0.1:1080"
 ```
 
-`proxy_url` overrides environment proxy variables. If `proxy_url` is empty, `proxy_from_environment` defaults to `true`, so `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` are honored. These environment variables may also contain `socks5://` or `socks5h://` URLs. Set it to `false` to force direct outbound connections:
+`proxy_url` overrides environment proxy variables. If `proxy_url` is empty, `proxy_from_environment` defaults to `true`, so `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (or their lowercase forms) from the logging-proxy process environment are honored. HTTP destinations use `HTTP_PROXY`, HTTPS destinations use `HTTPS_PROXY`, and `NO_PROXY` bypasses the selected proxy for matching destinations. Localhost and loopback destinations are always bypassed. These variables apply to outbound traffic from both reverse and forward proxy listeners and may contain `socks5://` or `socks5h://` URLs.
+
+The adjacent `.env` file is used for explicit `${VARIABLE}` config references; it does not export `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY` into the process environment. An inherited proxy URL that points back to this logging-proxy process is rejected at startup to prevent a proxy loop. Set `proxy_from_environment` to `false` to force direct outbound connections:
 
 ```yaml
 http_client:
@@ -128,8 +130,8 @@ proxy:
   host: "127.0.0.1"
   verbose: false
   auth:
-    username: "proxy-user"
-    password: "proxy-password"
+    username: "${FORWARD_PROXY_USERNAME}"
+    password: "${FORWARD_PROXY_PASSWORD}"
   mitm:
     enabled: true
     certs_dir: "certs"
@@ -155,7 +157,7 @@ Forward proxy behavior:
 - HTTPS without MITM is tunneled with CONNECT, so bodies are encrypted
 - HTTPS with MITM decrypts and logs request/response bodies
 
-`proxy.auth` is optional. When configured, clients must use HTTP Basic proxy authentication, for example `HTTP_PROXY=http://proxy-user:proxy-password@127.0.0.1:8080`.
+`proxy.auth` is optional. Its username and password may be literal values or exact `${VARIABLE}` references resolved from the process environment and adjacent `.env` file. When configured, clients must use HTTP Basic proxy authentication, for example `HTTP_PROXY=http://proxy-user:proxy-password@127.0.0.1:8080`.
 
 MITM creates or loads a persistent root/intermediate CA hierarchy in `proxy.mitm.certs_dir`. Trust `root-ca.crt` once on clients. Leaf certificates are signed by the intermediate CA, expire after 24 hours, and include a CRL distribution point at `http://<hostname>:<proxy-port>/crl`. `proxy.mitm.hostname` overrides the CRL hostname and is required when `proxy.host` is `0.0.0.0`, `::`, or empty.
 

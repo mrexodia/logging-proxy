@@ -162,6 +162,78 @@ proxy:
 	}
 }
 
+func TestLoadConfigResolvesProxyAuthFromEnvironmentAndDotEnv(t *testing.T) {
+	const usernameVariable = "LOGGING_PROXY_TEST_PROXY_AUTH_USERNAME"
+	const passwordVariable = "LOGGING_PROXY_TEST_PROXY_AUTH_PASSWORD"
+
+	oldPassword, hadPassword := os.LookupEnv(passwordVariable)
+	if err := os.Unsetenv(passwordVariable); err != nil {
+		t.Fatalf("failed to unset test environment variable: %v", err)
+	}
+	t.Cleanup(func() {
+		if hadPassword {
+			os.Setenv(passwordVariable, oldPassword)
+		} else {
+			os.Unsetenv(passwordVariable)
+		}
+	})
+	t.Setenv(usernameVariable, "username-from-process")
+
+	path := writeTestConfig(t, `
+proxy:
+  auth:
+    username: "${LOGGING_PROXY_TEST_PROXY_AUTH_USERNAME}"
+    password: "${LOGGING_PROXY_TEST_PROXY_AUTH_PASSWORD}"
+`)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), ".env"), []byte(
+		usernameVariable+"=username-from-dotenv\n"+
+			passwordVariable+"=password-from-dotenv\n"), 0600); err != nil {
+		t.Fatalf("failed to write .env: %v", err)
+	}
+
+	config, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if config.Proxy == nil || config.Proxy.Auth == nil {
+		t.Fatal("expected proxy authentication config")
+	}
+	if config.Proxy.Auth.Username != "username-from-process" {
+		t.Fatal("process environment did not override .env for proxy username")
+	}
+	if config.Proxy.Auth.Password != "password-from-dotenv" {
+		t.Fatal("proxy password was not resolved from .env")
+	}
+}
+
+func TestLoadConfigRejectsMissingProxyAuthEnvironmentVariable(t *testing.T) {
+	const variable = "LOGGING_PROXY_TEST_MISSING_PROXY_AUTH_PASSWORD"
+	old, hadValue := os.LookupEnv(variable)
+	if err := os.Unsetenv(variable); err != nil {
+		t.Fatalf("failed to unset test environment variable: %v", err)
+	}
+	t.Cleanup(func() {
+		if hadValue {
+			os.Setenv(variable, old)
+		} else {
+			os.Unsetenv(variable)
+		}
+	})
+
+	_, err := loadConfig(writeTestConfig(t, `
+proxy:
+  auth:
+    username: "proxy-user"
+    password: "${LOGGING_PROXY_TEST_MISSING_PROXY_AUTH_PASSWORD}"
+`))
+	if err == nil {
+		t.Fatal("expected missing proxy auth environment variable to fail")
+	}
+	if !strings.Contains(err.Error(), "proxy.auth.password") || !strings.Contains(err.Error(), variable) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadConfigAppliesServerDefaultsWhenServerPresent(t *testing.T) {
 	config, err := loadConfig(writeTestConfig(t, `
 server: {}

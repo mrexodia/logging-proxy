@@ -33,8 +33,8 @@ logging:
 #   host: "127.0.0.1"
 #   verbose: false
 #   auth:
-#     username: "proxy-user"
-#     password: "proxy-password"
+#     username: "${FORWARD_PROXY_USERNAME}"
+#     password: "${FORWARD_PROXY_PASSWORD}"
 #   mitm:
 #     enabled: true      # Enable to decrypt/log HTTPS traffic
 #     certs_dir: "certs"

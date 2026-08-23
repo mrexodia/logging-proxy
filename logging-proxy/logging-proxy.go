@@ -578,7 +578,7 @@ func readDotEnv(configFilename string) (map[string]string, error) {
 	return nil, fmt.Errorf("failed to read %s: %w", dotEnvFilename, err)
 }
 
-func resolveAuthorizationKey(value string, dotEnv map[string]string) (string, error) {
+func resolveEnvironmentValue(value string, dotEnv map[string]string) (string, error) {
 	matches := environmentReferencePattern.FindStringSubmatch(value)
 	if matches == nil {
 		return value, nil
@@ -629,7 +629,7 @@ func resolveRouteAuthorization(routeName string, authorization *AuthorizationCon
 
 	var err error
 	if authorization.BackendKey != "" {
-		authorization.BackendKey, err = resolveAuthorizationKey(authorization.BackendKey, dotEnv)
+		authorization.BackendKey, err = resolveEnvironmentValue(authorization.BackendKey, dotEnv)
 		if err != nil {
 			return fmt.Errorf("route %s authorization backend_key: %w", routeName, err)
 		}
@@ -639,13 +639,33 @@ func resolveRouteAuthorization(routeName string, authorization *AuthorizationCon
 	}
 
 	if authorization.ClientKey != "" {
-		authorization.ClientKey, err = resolveAuthorizationKey(authorization.ClientKey, dotEnv)
+		authorization.ClientKey, err = resolveEnvironmentValue(authorization.ClientKey, dotEnv)
 		if err != nil {
 			return fmt.Errorf("route %s authorization client_key: %w", routeName, err)
 		}
 		if !httpguts.ValidHeaderFieldValue(renderAuthorizationValue(authorization.Template, authorization.ClientKey)) {
 			return fmt.Errorf("route %s authorization client value is not a valid HTTP header value", routeName)
 		}
+	}
+	return nil
+}
+
+func resolveProxyAuth(auth *ProxyAuthConfig, dotEnv map[string]string) error {
+	if auth == nil {
+		return nil
+	}
+
+	var err error
+	auth.Username, err = resolveEnvironmentValue(auth.Username, dotEnv)
+	if err != nil {
+		return fmt.Errorf("proxy.auth.username: %w", err)
+	}
+	auth.Password, err = resolveEnvironmentValue(auth.Password, dotEnv)
+	if err != nil {
+		return fmt.Errorf("proxy.auth.password: %w", err)
+	}
+	if auth.Username == "" || auth.Password == "" {
+		return fmt.Errorf("proxy.auth requires both username and password")
 	}
 	return nil
 }
@@ -664,6 +684,12 @@ func loadConfig(filename string) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
+	}
+
+	if config.Proxy != nil {
+		if err := resolveProxyAuth(config.Proxy.Auth, dotEnv); err != nil {
+			return nil, err
+		}
 	}
 
 	for routeName, route := range config.Routes {
