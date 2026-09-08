@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -12,9 +13,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	loggingproxy "github.com/mrexodia/logging-proxy"
+	"github.com/mrexodia/logging-proxy/webui"
 	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
@@ -78,6 +81,7 @@ type ServerConfig struct {
 }
 
 type Config struct {
+	WebUI   *WebUIConfig  `yaml:"webui"`
 	Server  *ServerConfig `yaml:"server"`
 	Logging struct {
 		Enabled bool   `yaml:"enabled"`
@@ -88,6 +92,11 @@ type Config struct {
 	// proxy is optional. If present, a forward proxy listener is started.
 	Proxy  *ProxyConfig     `yaml:"proxy"`
 	Routes map[string]Route `yaml:"routes"`
+}
+
+type WebUIConfig struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
 }
 
 type namedServer struct {
@@ -151,6 +160,23 @@ func main() {
 				DisableGeneralOptionsHandler: true,
 			},
 		})
+	}
+
+	if config.WebUI != nil {
+		address, err := webui.ListenAddress(config.WebUI.Host, config.WebUI.Port)
+		if err != nil {
+			log.Fatal(err)
+		}
+		directory := config.Logging.LogDir
+		if directory == "" {
+			directory = "logs"
+		}
+		store, err := webui.NewStore(directory)
+		if err != nil {
+			log.Fatal("Cannot open web UI log directory: ", err)
+		}
+		go store.Run(context.Background())
+		servers = append(servers, namedServer{name: "web UI", server: &http.Server{Addr: address, Handler: webui.NewHandler(store), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}})
 	}
 
 	errCh := make(chan error, len(servers))
@@ -718,6 +744,11 @@ func loadConfig(filename string) (*Config, error) {
 		}
 		if config.Proxy.Port == 0 {
 			config.Proxy.Port = 8080
+		}
+	}
+	if config.WebUI != nil {
+		if _, err := webui.ListenAddress(config.WebUI.Host, config.WebUI.Port); err != nil {
+			return nil, err
 		}
 	}
 

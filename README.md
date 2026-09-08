@@ -175,6 +175,97 @@ go run ./logging-proxy
 
 With both `server:` and `proxy:` present, both listeners start.
 
+## Live web UI
+
+Start the read-only inspector **alongside an already running proxy**:
+
+```bash
+go run ./cmd/proxy-webui -log-dir logs -port 5602
+```
+
+Open **http://127.0.0.1:5602**. The standalone viewer does not load proxy config,
+start proxy listeners, create a logger, or restart the running proxy. It opens an
+existing log directory for reading only. No migration, cleanup, retention limit,
+rewrite, or deletion is performed. Run it from the proxy's working directory or
+pass an absolute `-log-dir` path. To build a standalone Windows executable:
+
+```powershell
+go build -o proxy-webui.exe ./cmd/proxy-webui
+.\proxy-webui.exe -log-dir logs -port 5602
+```
+
+The interface includes:
+
+- Live request arrivals and updates, with searchable, paginated history across
+  every transaction metadata file in the selected directory.
+- Request and response headers, bodies, lifecycle metadata, status and sizes.
+- SSE event decoding and bidirectional WebSocket frame inspection. Pause/resume
+  and reconnect continue from byte offsets in the original capture files.
+- Raw text and hex pages, plus full original-file downloads. Live previews retain
+  up to 2 MiB of text and 2 MiB / 300 decoded events; preview limits never affect
+  disk capture. Raw text pages may split a UTF-8 character at a page boundary;
+  hex pages and downloads preserve exact bytes.
+- An **All files** view with metadata, orphaned `.bin` captures, and `.zip`
+  archives. ZIPs are downloadable as originals; their contents are not indexed.
+
+JSONL and older per-stream JSON metadata are read directly. If both formats
+describe the same request ID, JSONL is preferred without deleting either file.
+Malformed/partial metadata remains downloadable and is flagged in the UI.
+History has no age or count cutoff. The viewer scans the directory once per
+second, caches unchanged completed metadata, and tails selected streams every
+250 ms. It does not recursively inspect subdirectories.
+
+**Unfinished** means there is no recorded completion for both streams. It can
+mean a live request, an upstream failure with no response capture, or a stream
+interrupted by a previous process exit. File watching cannot distinguish all
+three. Requests excluded by existing logging settings and opaque CONNECT
+tunnels have no disk capture to show.
+
+WebSocket capture is supported by the updated reverse and forward proxies
+(including HTTPS MITM). Each direction's existing `.bin` format contains the
+HTTP handshake followed by the exact WebSocket frames. Masked frames are
+unmasked for preview; binary and compressed frame payloads are shown in hex.
+Fragmented messages are shown frame by frame. The protocol follows
+[RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html). An older running proxy
+continues to supply its existing HTTP/SSE captures to the viewer, but needs a
+separately scheduled restart with the updated binary to gain WebSocket capture.
+Starting the viewer alone does not change that running binary.
+
+To start the inspector automatically with the proxy on a future normal startup,
+add this optional section to your config:
+
+```yaml
+webui:
+  host: "127.0.0.1"
+  port: 5602
+```
+
+Do not run the standalone and integrated viewers on the same port. The UI only
+accepts loopback listener addresses (`127.0.0.1`, `::1`, or `localhost`), rejects
+foreign Host/Origin headers, and loads no external scripts. Captures can include
+authorization headers and private bodies; use an authenticated tunnel if remote
+access is needed.
+
+### Read-only HTTP API
+
+All API routes use GET and return JSON except downloads and SSE streams:
+
+| Route | Behavior |
+| --- | --- |
+| `/api/requests?q=&state=&method=&offset=0&limit=100` | Newest-first metadata history; `state` is `completed`, `unfinished`, or `error`. Maximum page size is 500. |
+| `/api/requests/{key}` | Full transaction lifecycle and capture filenames. |
+| `/api/files?q=&offset=0&limit=100` | All recognized capture files and archives. |
+| `/api/file?name=…&offset=0` | Up to 64 KiB, base64 encoded, with byte offsets and current size. |
+| `/api/file?name=…&download=1` | Original bytes, with HTTP Range support. An active download reflects the size when it starts. |
+| `/api/events` | SSE `change` notifications with an index revision; refetch history after each new revision or reconnect. |
+| `/api/tail?name=…&offset=0` | SSE `chunk` events with base64 bytes and offsets, followed by `end` after recorded stream completion. |
+
+Tail event IDs are the next byte offset. `Last-Event-ID` takes precedence over
+the `offset` query argument when reconnecting. Slow or disconnected viewers
+replay from disk; they never block a proxy request or cause capture eviction.
+Keep-alive notifications are sent at least every 15 seconds while waiting. A
+stream without a completion record remains open until the viewer disconnects.
+
 ## MITM client setup
 
 For HTTPS body capture, enable `proxy.mitm.enabled` and trust the generated root CA:
@@ -275,6 +366,7 @@ Go `http.ServeMux` supports wildcards, but this proxy currently rejects named wi
 
 ```bash
 go test ./...
+node --test webui/decoders_test.mjs
 ```
 
 ## Build for Linux

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Proxy · Traffic inspector</title><link rel="stylesheet" href="style.css"><script type="module" src="app.js"></script></head>
+<body>
+<header><div class="brand"><span class="mark">⇄</span><div><strong>PROXY</strong><span class="muted">Traffic inspector</span></div></div><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection" role="status">Connecting…</span><button id="pause">Pause updates</button></div></header>
+<main>
+<div class="overview"><div><span class="eyebrow">CAPTURE LIBRARY</span><h1>Traffic, as it happens.</h1></div><div class="stats"><div><strong id="total">—</strong><span>requests</span></div><div><strong id="unfinished">—</strong><span title="A missing completion can mean a live stream or an interrupted capture.">unfinished</span></div><div><strong id="errors">—</strong><span>errors / HTTP 4xx–5xx</span></div></div></div>
+<p id="problem" role="alert" hidden></p>
+<div class="workspace">
+<section class="library" aria-label="Capture history">
+<div class="toolbar"><div class="tabs"><button id="requests-tab" class="selected" aria-pressed="true">Requests</button><button id="files-tab" aria-pressed="false">All files</button></div><button id="refresh" title="Refresh history">Refresh</button></div>
+<div class="filters"><label class="search"><span class="sr-only">Search capture history</span><input id="search" type="search" placeholder="Search URL, ID, method, status…"></label><label><span class="sr-only">Capture state</span><select id="state"><option value="">All states</option><option value="unfinished">Unfinished</option><option value="completed">Completed</option><option value="error">Capture error</option></select></label></div>
+<div class="table-scroll"><table><thead id="table-head"></thead><tbody id="rows"></tbody></table><p id="empty" class="empty" hidden>No captures match this search.</p></div>
+<footer class="pagination"><span id="range">Loading history…</span><div><button id="previous" disabled>← Newer</button><button id="next" disabled>Older →</button></div></footer>
+<p class="footnote">Read-only · Original captures stay on disk. “Unfinished” may be live or interrupted.</p>
+</section>
+<section class="inspector" aria-label="Request inspector"><div id="select-hint" class="select-hint"><span class="mark">↳</span><h2>Follow a request</h2><p>Select a capture to inspect its headers, body, and live stream.</p></div>
+<div id="detail" hidden>
+<div class="detail-heading"><span class="eyebrow">REQUEST INSPECTOR</span><h2 id="detail-title"></h2><p id="detail-url"></p><p id="detail-meta" class="muted"></p></div>
+<details><summary>Lifecycle & metadata</summary><div id="metadata-links" class="download-links"></div><pre id="metadata"></pre></details>
+<p id="detail-problem" role="status" hidden></p>
+<div class="toolbar"><div class="tabs"><button id="request-direction" aria-pressed="false">Request</button><button id="response-direction" class="selected" aria-pressed="true">Response</button></div><a id="download" class="button" download>Download original</a></div>
+<div class="stream-controls"><label>View <select id="view"><option value="stream">Live stream</option><option value="raw">Raw text</option><option value="hex">Raw hex</option></select></label><button id="follow">Pause stream</button><span id="stream-status" role="status">Waiting for capture…</span></div>
+<div id="raw-controls" class="pagination" hidden><button id="raw-previous">← Previous 64 KiB</button><span id="raw-range"></span><button id="raw-next">Next 64 KiB →</button></div>
+<p id="preview-note" class="footnote">The live preview keeps the latest 2 MiB and 300 events. Use raw pages or download for the complete capture.</p>
+<div id="stream-content" tabindex="0"><pre id="raw-content"></pre><div id="messages"></div></div>
+</div></section>
+</div>
+</main>
+</body></html>

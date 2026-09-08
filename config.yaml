@@ -1,7 +1,7 @@
 # Optional reverse proxy listener. Omit this section to run only the forward proxy.
 server:
   port: 5601
-  host: "localhost"
+  host: "0.0.0.0"
   not_found: "/404/"
 
 logging:
@@ -84,3 +84,14 @@ routes:
     destination: "https://api.cerebras.ai/v1/"
     authorization:
       backend_key: "${CEREBRAS_API_KEY}"
+  sglang:
+    pattern: "/sglang/"
+    destination: "http://spark.ogilvie.lan:30000/v1/"
+  camel:
+    pattern: "/camel/"
+    destination: "https://stream.camelai.com/v1/"
+    authorization:
+      backend_key: "${CAMEL_API_KEY}"
+  vllm:
+    pattern: "/vllm/"
+    destination: "http://spark.ogilvie.lan:8888/v1/"

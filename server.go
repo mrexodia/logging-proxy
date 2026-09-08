@@ -250,6 +250,10 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 	if len(request.URL.RawQuery) > 0 {
 		destinationURL.RawQuery = request.URL.RawQuery
 	}
+	if isWebSocketUpgrade(request.Header) {
+		s.handleWebSocket(w, request, destinationURL, logger)
+		return
+	}
 
 	if !loggerCaptureEnabled(logger) {
 		s.handleRequestWithoutLogging(w, request, destinationURL)

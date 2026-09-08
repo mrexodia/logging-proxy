@@ -19,6 +19,27 @@ func writeTestConfig(t *testing.T, content string) string {
 	return path
 }
 
+func TestWebUIConfiguration(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "localhost", "::1", "0.0.0.0", "external.test"} {
+		t.Run(host, func(t *testing.T) {
+			filename := writeTestConfig(t, "server:\n  port: 5601\nwebui:\n  host: '"+host+"'\n  port: 5602\n")
+			config, err := loadConfig(filename)
+			if host == "0.0.0.0" || host == "external.test" {
+				if err == nil {
+					t.Fatal("nonloopback web UI accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.WebUI == nil || config.WebUI.Port != 5602 {
+				t.Fatal("web UI config missing")
+			}
+		})
+	}
+}
+
 func TestCRLHostnameUsesConfiguredMITMHostname(t *testing.T) {
 	got, err := crlHostname("litellm.ogilvie.lan", "0.0.0.0", 8841)
 	if err != nil {

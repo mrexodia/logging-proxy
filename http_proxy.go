@@ -57,8 +57,9 @@ type httpProxyAuthenticator struct {
 }
 
 type httpProxyRequestState struct {
-	metadata    RequestMetadata
-	requestTime time.Time
+	metadata       RequestMetadata
+	requestTime    time.Time
+	upgradeRequest *io.PipeWriter
 }
 
 type teeReadCloser struct {
@@ -290,6 +291,9 @@ func (s *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mitmCA.ServeCRL(w, r)
 		return
 	}
+	if isWebSocketUpgrade(r.Header) {
+		w = &upgradeResponseWriter{ResponseWriter: w}
+	}
 	s.proxy.ServeHTTP(w, r)
 }
 
@@ -474,7 +478,31 @@ func (s *HTTPProxyServer) handleRequest(request *http.Request, ctx *goproxy.Prox
 		RequestStartedAt:       requestTime,
 		RequestContentEncoding: requestContentEncoding,
 	}
-	ctx.UserData = &httpProxyRequestState{metadata: metadata, requestTime: requestTime}
+	state := &httpProxyRequestState{metadata: metadata, requestTime: requestTime}
+	ctx.UserData = state
+	if isWebSocketUpgrade(request.Header) {
+		state.upgradeRequest = startUpgradeLog(s.logger, metadata, requestTime, fmt.Sprintf("%s %s %s", request.Method, targetURL.String(), request.Proto), request.Header, false)
+		// goproxy's MITM path returns directly on transport failure without
+		// invoking response hooks. Ensure that path also releases the log pipe.
+		upstream := ctx.RoundTripper
+		ctx.RoundTripper = goproxy.RoundTripperFunc(func(r *http.Request, c *goproxy.ProxyCtx) (*http.Response, error) {
+			var response *http.Response
+			var err error
+			if upstream != nil {
+				response, err = upstream.RoundTrip(r, c)
+			} else {
+				response, err = c.Proxy.Tr.RoundTrip(r)
+			}
+			if err != nil {
+				_ = state.upgradeRequest.CloseWithError(err)
+			}
+			return response, err
+		})
+		if request.Body != nil && request.Body != http.NoBody {
+			request.Body = &readCloser{Reader: io.TeeReader(request.Body, state.upgradeRequest), Closer: request.Body}
+		}
+		return request, nil
+	}
 
 	requestHeaders := request.Header.Clone()
 	request.Body = wrapBodyForLogging(request.Body, func(body io.ReadCloser) {
@@ -485,7 +513,14 @@ func (s *HTTPProxyServer) handleRequest(request *http.Request, ctx *goproxy.Prox
 }
 
 func (s *HTTPProxyServer) handleResponse(response *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	var state *httpProxyRequestState
+	if ctx != nil {
+		state, _ = ctx.UserData.(*httpProxyRequestState)
+	}
 	if response == nil {
+		if state != nil && state.upgradeRequest != nil {
+			_ = state.upgradeRequest.Close()
+		}
 		return response
 	}
 
@@ -501,8 +536,7 @@ func (s *HTTPProxyServer) handleResponse(response *http.Response, ctx *goproxy.P
 		response.ProtoMinor = ctx.Req.ProtoMinor
 	}
 
-	state, ok := ctx.UserData.(*httpProxyRequestState)
-	if !ok || state == nil {
+	if state == nil {
 		return response
 	}
 
@@ -515,6 +549,14 @@ func (s *HTTPProxyServer) handleResponse(response *http.Response, ctx *goproxy.P
 	metadata.ResponseStatus = response.Status
 	metadata.ResponseStatusCode = response.StatusCode
 	metadata.ResponseContentEncoding = responseContentEncoding
+	if state.upgradeRequest != nil {
+		if upstream, ok := response.Body.(io.ReadWriteCloser); ok && response.StatusCode == http.StatusSwitchingProtocols && isWebSocketUpgrade(response.Header) {
+			writer := startUpgradeLog(s.logger, metadata, responseTime, upstreamProto+" "+response.Status, responseHeaders, true)
+			response.Body = newUpgradeCapture(ctx.Req.Context(), upstream, state.upgradeRequest, writer)
+			return response
+		}
+		_ = state.upgradeRequest.Close()
+	}
 
 	response.Body = wrapBodyForLogging(response.Body, func(body io.ReadCloser) {
 		s.logHTTPProxyResponse(metadata, responseTime, upstreamProto, response.Status, responseHeaders, responseContentEncoding, body)
