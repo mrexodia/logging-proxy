@@ -278,6 +278,30 @@ export HTTPS_PROXY=http://127.0.0.1:8080
 
 Without MITM, HTTPS bodies are not visible.
 
+## Streaming behavior
+
+The reverse proxy flushes response headers as soon as they arrive and flushes
+body bytes after each forwarded read. This applies with logging enabled or
+disabled, to SSE and other response types, and to fixed-length responses as
+well as unknown-length streams. Successful WebSocket upgrades remain
+bidirectional tunnels; rejected upgrades use the same HTTP response flushing.
+Embedded `ResponseWriter` wrappers should expose `Unwrap() http.ResponseWriter`
+or support flushing; without either, the body is still forwarded but immediate
+flushing cannot be guaranteed.
+
+This avoids waiting for Go's HTTP output buffers to fill or for the response to
+finish. It does not preserve HTTP chunk/TCP packet boundaries, and downstream
+proxies or clients may still buffer traffic. Small responses without an upstream
+`Content-Length` may now use chunked encoding over HTTP/1.1 rather than an
+automatically computed length. Frequent flushing favors latency over write
+coalescing.
+
+Logging uses synchronous tees into capture pipes, consumed by logging
+goroutines. Captures are not queued in unbounded memory or deliberately dropped
+to keep up: a slow logger or disk can still backpressure forwarding. Disabling
+logging removes that capture overhead. This flushing change does not change the
+forward proxy's goproxy-managed response transport.
+
 ## Logging
 
 Logs are written to `logging.log_dir`.

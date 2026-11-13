@@ -188,7 +188,10 @@ func (s *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, de
 		if responseWriter != nil {
 			body = io.TeeReader(body, responseWriter)
 		}
-		_, _ = copyProxyStream(w, body)
+		_, copyErr := copyProxyResponse(w, body)
+		if responseWriter != nil {
+			responseWriter.CloseWithError(copyErr)
+		}
 		return
 	}
 	upstream, ok := response.Body.(io.ReadWriteCloser)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -315,7 +316,8 @@ func TestStreamingWithNewArchitecture(t *testing.T) {
 		}
 	}
 
-	// Test verifies that the proxy correctly handles streaming responses
+	// This checks body integrity only. TestReverseProxyFlushesResponse also
+	// verifies headers and chunks arrive before the upstream finishes.
 }
 
 func TestConfigValidationNew(t *testing.T) {
@@ -903,10 +905,32 @@ func TestExperimentHttpExamples(t *testing.T) {
 	}
 }
 
-// TestLogger is a test logger that captures logged requests and responses
+// TestLogger captures one transaction. Tests wait for both logging goroutines
+// before inspecting the slices; sleeping does not synchronize concurrent access.
 type TestLogger struct {
 	requests  []capturedLog
 	responses []capturedLog
+	done      sync.WaitGroup
+}
+
+func newTestLogger() *TestLogger {
+	logger := &TestLogger{}
+	logger.done.Add(2)
+	return logger
+}
+
+func (l *TestLogger) wait(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		l.done.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("logging did not complete")
+	}
 }
 
 type capturedLog struct {
@@ -916,6 +940,7 @@ type capturedLog struct {
 }
 
 func (l *TestLogger) LogRequest(metadata RequestMetadata, timestamp time.Time, rawRequestStream io.ReadCloser) {
+	defer l.done.Done()
 	defer rawRequestStream.Close()
 	content, _ := io.ReadAll(rawRequestStream)
 	l.requests = append(l.requests, capturedLog{
@@ -926,6 +951,7 @@ func (l *TestLogger) LogRequest(metadata RequestMetadata, timestamp time.Time, r
 }
 
 func (l *TestLogger) LogResponse(metadata RequestMetadata, timestamp time.Time, rawResponseStream io.ReadCloser) {
+	defer l.done.Done()
 	defer rawResponseStream.Close()
 	content, _ := io.ReadAll(rawResponseStream)
 	l.responses = append(l.responses, capturedLog{
@@ -944,7 +970,7 @@ func TestRequestLogFormat(t *testing.T) {
 	defer backend.Close()
 
 	// Create test logger to capture logs
-	testLogger := &TestLogger{}
+	testLogger := newTestLogger()
 
 	// Create proxy server with HTTPS backend and configure it to skip TLS verification for tests
 	proxyServer := NewProxyServer("")
@@ -971,8 +997,7 @@ func TestRequestLogFormat(t *testing.T) {
 	// Read response to ensure it completes
 	io.ReadAll(resp.Body)
 
-	// Give async logging a moment to complete
-	time.Sleep(100 * time.Millisecond)
+	testLogger.wait(t)
 
 	// Verify we captured the request log
 	if len(testLogger.requests) != 1 {
@@ -1023,7 +1048,7 @@ func TestRealHTTPSEndpoint(t *testing.T) {
 	// Using OpenRouter's /api/v1/models endpoint which doesn't require authentication
 
 	// Create test logger to capture logs
-	testLogger := &TestLogger{}
+	testLogger := newTestLogger()
 
 	// Create proxy server with real HTTPS destination
 	proxyServer := NewProxyServer("")
@@ -1061,8 +1086,7 @@ func TestRealHTTPSEndpoint(t *testing.T) {
 		t.Errorf("Expected valid JSON response, got error: %v. Body: %s", jsonErr, string(responseBody[:min(200, len(responseBody))]))
 	}
 
-	// Give async logging a moment to complete
-	time.Sleep(100 * time.Millisecond)
+	testLogger.wait(t)
 
 	// Verify we captured the request log
 	if len(testLogger.requests) != 1 {
@@ -1118,7 +1142,7 @@ func TestGzipRequestLogging(t *testing.T) {
 	defer backend.Close()
 
 	// Create test logger to capture logs
-	testLogger := &TestLogger{}
+	testLogger := newTestLogger()
 
 	// Create proxy server
 	proxyServer := NewProxyServer("")
@@ -1156,8 +1180,7 @@ func TestGzipRequestLogging(t *testing.T) {
 	// Read response to ensure it completes
 	io.ReadAll(resp.Body)
 
-	// Give async logging a moment to complete
-	time.Sleep(100 * time.Millisecond)
+	testLogger.wait(t)
 
 	// Verify we captured the request log
 	if len(testLogger.requests) != 1 {
@@ -1202,7 +1225,7 @@ func TestGzipResponseLogging(t *testing.T) {
 	defer backend.Close()
 
 	// Create test logger to capture logs
-	testLogger := &TestLogger{}
+	testLogger := newTestLogger()
 
 	// Create proxy server
 	proxyServer := NewProxyServer("")
@@ -1230,8 +1253,7 @@ func TestGzipResponseLogging(t *testing.T) {
 	// Read response (will be auto-decompressed by http client)
 	clientBody, _ := io.ReadAll(resp.Body)
 
-	// Give async logging a moment to complete
-	time.Sleep(100 * time.Millisecond)
+	testLogger.wait(t)
 
 	// Verify we captured the response log
 	if len(testLogger.responses) != 1 {
@@ -1299,7 +1321,7 @@ func TestCompressionPassthrough(t *testing.T) {
 	defer backend.Close()
 
 	// Create test logger
-	testLogger := &TestLogger{}
+	testLogger := newTestLogger()
 
 	// Create proxy server
 	proxyServer := NewProxyServer("")
@@ -1353,8 +1375,7 @@ func TestCompressionPassthrough(t *testing.T) {
 		t.Errorf("Expected response %q, got %s", expectedResponse, string(responseData))
 	}
 
-	// Give async logging time to complete
-	time.Sleep(100 * time.Millisecond)
+	testLogger.wait(t)
 
 	// Verify logs contain decompressed data
 	if len(testLogger.requests) != 1 {

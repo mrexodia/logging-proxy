@@ -428,11 +428,10 @@ func (s *ProxyServer) handleRequest(w http.ResponseWriter, request *http.Request
 		})
 	}()
 
-	// Stream the response body (no error checking, because we already wrote the response).
-	_, _ = copyProxyStream(w, responseBody)
-
-	// Close the response writer now that response body has been consumed.
-	responseLogWriter.Close()
+	// Headers and body chunks must reach the client without waiting for the
+	// response to finish. A failed copy/flush also marks the capture incomplete.
+	_, copyErr := copyProxyResponse(w, responseBody)
+	responseLogWriter.CloseWithError(copyErr)
 }
 
 func (s *ProxyServer) handleRequestWithoutLogging(w http.ResponseWriter, request *http.Request, destinationURL url.URL) {
@@ -453,5 +452,5 @@ func (s *ProxyServer) handleRequestWithoutLogging(w http.ResponseWriter, request
 		}
 	}
 	w.WriteHeader(response.StatusCode)
-	_, _ = copyProxyStream(w, response.Body)
+	_, _ = copyProxyResponse(w, response.Body)
 }
