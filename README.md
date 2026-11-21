@@ -71,18 +71,25 @@ routes:
     destination: "https://openrouter.ai/api/v1/"
     authorization:
       header: "Authorization"                 # Default: Authorization
-      backend_key: "${OPENROUTER_API_KEY}"    # Optional if client_key is set
+      backend_key: "${OPENROUTER_API_KEY}"    # Optional with client credentials
       template: "Bearer {}"                    # Default for Authorization
-      client_key: "${LOCAL_PROXY_ACCESS_KEY}"  # Optional
+      client_keys:                             # Optional client allowlist
+        - "${LAPTOP_PROXY_KEY}"
+        - "${SERVER_PROXY_KEY}"
+      # client_key: "${LOCAL_PROXY_ACCESS_KEY}" # Legacy single key, still supported
 ```
 
 Keys may be literal values or exact `${VARIABLE}` references. Variables are read from the process environment first, then from an optional `.env` file beside the selected config file. Existing process variables override `.env`; a referenced variable that is missing or empty causes startup to fail.
 
-For the `Authorization` header, `template` defaults to `Bearer {}`. Other header names require an explicit template such as `{}` for a raw API key. A template must contain exactly one literal `{}` and formats both keys. At least one key is required:
+For the `Authorization` header, `template` defaults to `Bearer {}`. Other header names require an explicit template such as `{}` for a raw API key. A template must contain exactly one literal `{}` and formats the backend key and every client key. At least one backend or client key is required:
 
 - `backend_key` only: inject the formatted backend credential without authenticating local clients.
-- Both keys: validate the formatted client credential, then replace it with the backend credential.
-- `client_key` only: validate the formatted client credential, then remove that header before forwarding.
+- `backend_key` with `client_key` and/or `client_keys`: accept any configured client key, then replace it with the backend credential.
+- `client_key` and/or `client_keys` without `backend_key`: validate the client credential, then remove that header before forwarding.
+
+`client_key` remains backward compatible. If both `client_key` and `client_keys` are set, their keys are combined into one allowlist. Each `client_keys` entry supports the same literal values and `${VARIABLE}` references as `client_key`. Empty entries, invalid HTTP header values, and an explicit empty list (`client_keys: []`) are rejected at startup.
+
+To revoke a client independently, remove its entry from `client_keys` and restart the proxy. If the same key is also configured in `client_key`, remove it there too. Configuration is not hot-reloaded. To disable all access, disable/remove the route rather than removing all client authentication settings: a route with only `backend_key` does not authenticate clients.
 
 A missing or incorrect client credential returns `401` without calling the backend. Outgoing request logs contain the authorization header actually sent upstream.
 
@@ -90,6 +97,9 @@ Example `.env`:
 
 ```dotenv
 OPENROUTER_API_KEY=sk-backend-secret
+LAPTOP_PROXY_KEY=laptop-client-secret
+SERVER_PROXY_KEY=server-client-secret
+# For legacy client_key configurations:
 LOCAL_PROXY_ACCESS_KEY=local-client-secret
 ```
 

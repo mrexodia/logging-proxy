@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,12 +21,14 @@ import (
 
 // RouteAuthorization configures an optional client credential check and an
 // optional authorization value sent to the backend for a reverse proxy route.
-// When only ClientValue is set, the validated client header is removed before
-// forwarding.
+// ClientValue and ClientValues are combined into an allowlist. When client
+// credentials are configured without BackendValue, the validated header is
+// removed before forwarding.
 type RouteAuthorization struct {
 	Header       string
 	BackendValue string
-	ClientValue  string
+	ClientValue  string // Legacy single credential; accepted alongside ClientValues.
+	ClientValues []string
 }
 
 // RouteOptions configures optional behavior for a reverse proxy route.
@@ -109,7 +112,7 @@ func (s *ProxyServer) AddRouteWithOptions(pattern string, destination string, lo
 
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if authorization != nil {
-			if authorization.ClientValue != "" && r.Header.Get(authorization.Header) != authorization.ClientValue {
+			if !authorization.acceptsClientValue(r.Header.Get(authorization.Header)) {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -141,7 +144,16 @@ func validateRouteAuthorization(authorization *RouteAuthorization) (*RouteAuthor
 	if !httpguts.ValidHeaderFieldName(validated.Header) {
 		return nil, fmt.Errorf("invalid authorization header name %q", validated.Header)
 	}
-	if validated.BackendValue == "" && validated.ClientValue == "" {
+	if validated.ClientValues != nil && len(validated.ClientValues) == 0 {
+		return nil, fmt.Errorf("authorization client values must not be an empty list")
+	}
+	validated.ClientValues = append([]string(nil), authorization.ClientValues...)
+	for i, value := range validated.ClientValues {
+		if value == "" || !httpguts.ValidHeaderFieldValue(value) {
+			return nil, fmt.Errorf("authorization client value at index %d must be a non-empty valid HTTP header value", i)
+		}
+	}
+	if validated.BackendValue == "" && validated.ClientValue == "" && len(validated.ClientValues) == 0 {
 		return nil, fmt.Errorf("authorization requires a backend value, a client value, or both")
 	}
 	if validated.BackendValue != "" && !httpguts.ValidHeaderFieldValue(validated.BackendValue) {
@@ -151,6 +163,20 @@ func validateRouteAuthorization(authorization *RouteAuthorization) (*RouteAuthor
 		return nil, fmt.Errorf("authorization client value is not a valid HTTP header value")
 	}
 	return &validated, nil
+}
+
+func (a *RouteAuthorization) acceptsClientValue(value string) bool {
+	if a.ClientValue == "" && len(a.ClientValues) == 0 {
+		return true
+	}
+	matched := 0
+	if a.ClientValue != "" {
+		matched |= subtle.ConstantTimeCompare([]byte(value), []byte(a.ClientValue))
+	}
+	for _, allowed := range a.ClientValues {
+		matched |= subtle.ConstantTimeCompare([]byte(value), []byte(allowed))
+	}
+	return matched == 1
 }
 
 type readCloser struct {

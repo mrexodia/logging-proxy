@@ -95,3 +95,13 @@ routes:
   vllm:
     pattern: "/vllm/"
     destination: "http://spark.ogilvie.lan:8888/v1/"
+  experiential:
+    pattern: "/experiential/"
+    destination: "https://api.experientiallabs.ai/v1/"
+    authorization:
+      backend_key: "${EXPERIENTIAL_API_KEY}"
+  inception:
+    pattern: "/inception/"
+    destination: "https://api.inceptionlabs.ai/v1/"
+    authorization:
+      backend_key: "${INCEPTION_API_KEY}"

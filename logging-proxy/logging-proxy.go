@@ -42,10 +42,11 @@ type Route struct {
 // AuthorizationConfig injects a backend credential and optionally requires a
 // different credential from clients of the local reverse proxy route.
 type AuthorizationConfig struct {
-	Header     string `yaml:"header"`
-	BackendKey string `yaml:"backend_key"`
-	Template   string `yaml:"template"`
-	ClientKey  string `yaml:"client_key"`
+	Header     string   `yaml:"header"`
+	BackendKey string   `yaml:"backend_key"`
+	Template   string   `yaml:"template"`
+	ClientKey  string   `yaml:"client_key"`
+	ClientKeys []string `yaml:"client_keys"`
 }
 
 type ProxyAuthConfig struct {
@@ -484,6 +485,9 @@ func buildReverseProxy(config *Config, globalLogger loggingproxy.Logger, clientP
 			if authorization.ClientKey != "" {
 				options.Authorization.ClientValue = renderAuthorizationValue(authorization.Template, authorization.ClientKey)
 			}
+			for _, key := range authorization.ClientKeys {
+				options.Authorization.ClientValues = append(options.Authorization.ClientValues, renderAuthorizationValue(authorization.Template, key))
+			}
 		}
 
 		if err := proxy.AddRouteWithOptions(route.Pattern, route.Destination, logger, options); err != nil {
@@ -648,8 +652,11 @@ func resolveRouteAuthorization(routeName string, authorization *AuthorizationCon
 		return fmt.Errorf("route %s authorization template must contain exactly one {} placeholder", routeName)
 	}
 
-	if authorization.BackendKey == "" && authorization.ClientKey == "" {
-		return fmt.Errorf("route %s authorization requires backend_key, client_key, or both", routeName)
+	if authorization.ClientKeys != nil && len(authorization.ClientKeys) == 0 {
+		return fmt.Errorf("route %s authorization client_keys must not be an empty list", routeName)
+	}
+	if authorization.BackendKey == "" && authorization.ClientKey == "" && len(authorization.ClientKeys) == 0 {
+		return fmt.Errorf("route %s authorization requires at least one of backend_key, client_key, or client_keys", routeName)
 	}
 
 	var err error
@@ -671,6 +678,19 @@ func resolveRouteAuthorization(routeName string, authorization *AuthorizationCon
 		if !httpguts.ValidHeaderFieldValue(renderAuthorizationValue(authorization.Template, authorization.ClientKey)) {
 			return fmt.Errorf("route %s authorization client value is not a valid HTTP header value", routeName)
 		}
+	}
+	for i, key := range authorization.ClientKeys {
+		resolved, err := resolveEnvironmentValue(key, dotEnv)
+		if err != nil {
+			return fmt.Errorf("route %s authorization client_keys[%d]: %w", routeName, i, err)
+		}
+		if resolved == "" {
+			return fmt.Errorf("route %s authorization client_keys[%d] must not be empty", routeName, i)
+		}
+		if !httpguts.ValidHeaderFieldValue(renderAuthorizationValue(authorization.Template, resolved)) {
+			return fmt.Errorf("route %s authorization client_keys[%d] is not a valid HTTP header value", routeName, i)
+		}
+		authorization.ClientKeys[i] = resolved
 	}
 	return nil
 }

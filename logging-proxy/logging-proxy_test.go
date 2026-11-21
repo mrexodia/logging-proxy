@@ -350,7 +350,7 @@ routes:
 	if err == nil {
 		t.Fatal("expected empty authorization to fail")
 	}
-	if !strings.Contains(err.Error(), "backend_key, client_key, or both") {
+	if !strings.Contains(err.Error(), "at least one of backend_key, client_key, or client_keys") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
