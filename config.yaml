@@ -105,3 +105,6 @@ routes:
     destination: "https://api.inceptionlabs.ai/v1/"
     authorization:
       backend_key: "${INCEPTION_API_KEY}"
+  maya:
+    pattern: "/maya/"
+    destination: "http://127.0.0.1:18000/v1/"
