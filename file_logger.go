@@ -72,11 +72,25 @@ type fileLogEvent struct {
 func (f *FileLogger) logRawStream(metadata RequestMetadata, timestamp time.Time, rawStream io.ReadCloser, streamType string) {
 	defer rawStream.Close()
 
+	// Keep the request, response, and shared metadata together even when a
+	// transaction crosses midnight. Use the same timezone as its timestamp.
+	startedAt := metadata.RequestStartedAt
+	if startedAt.IsZero() {
+		startedAt = timestamp
+	}
+	logDir := filepath.Join(f.LogDir, startedAt.Format("2006-01-02"))
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Printf("[error] Failed to create log directory %s: %v", logDir, err)
+		// Drain the pipe so a filesystem failure cannot stall proxy traffic.
+		_, _ = io.Copy(io.Discard, rawStream)
+		return
+	}
+
 	timestampStr := timestamp.Format("2006-01-02_15-04-05.000")
 	metadataID := shortMetadataID(metadata)
 	filename := fmt.Sprintf("%s_%s_%s.bin", timestampStr, metadataID, streamType)
-	filePath := filepath.Join(f.LogDir, filename)
-	metadataPath := filepath.Join(f.LogDir, transactionMetadataFilename(metadata, timestamp))
+	filePath := filepath.Join(logDir, filename)
+	metadataPath := filepath.Join(logDir, transactionMetadataFilename(metadata, timestamp))
 
 	metadataFile, metadataErr := os.OpenFile(metadataPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if metadataErr != nil {

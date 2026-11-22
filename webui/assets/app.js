@@ -9,20 +9,30 @@ function node(tag,text,className) { const el=document.createElement(tag); if(tex
 function fileURL(name,download=false) { return `/api/file?name=${encodeURIComponent(name)}${download?'&download=1':''}`; }
 function currentFile() { return state.detail?.[state.direction+'_file']; }
 
+function syncDays(days) {
+  const select=$('day'), selected=select.value;
+  const values=[...new Set([...(days||[]),...(selected?[selected]:[])])].sort().reverse();
+  const options=['',...values];
+  if(JSON.stringify(Array.from(select.options,option=>option.value))!==JSON.stringify(options)) {
+    select.replaceChildren(...options.map(day=>{const option=node('option',day||'All days');option.value=day;return option;}));
+    select.value=selected;
+  }
+}
+
 async function refresh() {
-  const seq=++state.listSeq; const params=new URLSearchParams({offset:state.offset,limit:100,q:$('search').value});
+  const seq=++state.listSeq; const params=new URLSearchParams({offset:state.offset,limit:100,q:$('search').value,day:$('day').value});
   if(state.mode==='requests') params.set('state',$('state').value);
   try {
     const result=await api(`/api/${state.mode==='requests'?'requests':'files'}?${params}`); if(seq!==state.listSeq) return;
     if(state.offset>=result.total&&state.offset>0) { state.offset=Math.max(0,Math.floor((result.total-1)/100)*100); return refresh(); }
-    state.total=result.total; notice('problem',result.problem);
+    state.total=result.total; syncDays(result.days); notice('problem',result.problem);
     if(state.mode==='requests') { $('total').textContent=result.all.toLocaleString(); $('unfinished').textContent=result.unfinished.toLocaleString(); $('errors').textContent=result.errors.toLocaleString(); }
     $('rows').replaceChildren(); $('table-head').replaceChildren(); const heading=node('tr');
     for(const title of state.mode==='requests'?['Time / method','Destination','Status / size']:['Size','Capture file','Open']) heading.append(node('th',title)); $('table-head').append(heading);
     for(const item of result.items) {
       const row=node('tr');
       if(state.mode==='files') {
-        row.append(node('td',bytes(item.size),'muted')); const cell=node('td'); const label=node('div',item.name); label.style.overflowWrap='anywhere'; cell.append(label,node('div',item.problem||time(item.modified),'muted')); row.append(cell); const action=node('td'); const a=node('a','Download'); a.href=fileURL(item.name,true); a.download=item.name; action.append(a); row.append(action);
+        row.append(node('td',bytes(item.size),'muted')); const cell=node('td'); const label=node('div',item.name); label.style.overflowWrap='anywhere'; cell.append(label,node('div',item.problem||time(item.modified),'muted')); row.append(cell); const action=node('td'); const a=node('a','Download'); a.href=fileURL(item.name,true); a.download=item.name.split('/').pop(); action.append(a); row.append(action);
       } else {
         if(item.key===state.key) row.classList.add('current'); const meta=item.metadata; const left=node('td'); left.append(node('div',meta.method||'—','method'),node('div',time(item.started),'time')); row.append(left);
         const middle=node('td'); const button=node('button',undefined,'row-link'); let target=meta.target_url||meta.source_url||item.metadata_files?.[0]||'Unknown request'; let path=target,host=''; try { const url=new URL(target); path=url.pathname+url.search; host=url.host; } catch {}
@@ -45,7 +55,7 @@ async function select(key,update=false) {
     $('detail-url').textContent=meta.target_url||meta.source_url||'';
     $('detail-meta').textContent=`${time(detail.started)} · ${detail.duration_ms} ms recorded · ${meta.id||'No request ID'}`;
     $('metadata').textContent=JSON.stringify(detail,null,2); $('metadata-links').replaceChildren();
-    for(const name of detail.metadata_files||[]) { const a=node('a',name); a.href=fileURL(name,true); a.download=name; $('metadata-links').append(a); }
+    for(const name of detail.metadata_files||[]) { const a=node('a',name); a.href=fileURL(name,true); a.download=name.split('/').pop(); $('metadata-links').append(a); }
     notice('detail-problem',(detail.problems||[]).join('\n'));
     syncCapture(); if(!update) refresh();
   } catch(error) { if(seq===state.detailSeq) notice('detail-problem',error.message); }
@@ -63,7 +73,7 @@ function resetPreview() {
 function appendText(text) { textPreview=(textPreview+text).slice(-2*1024*1024); if(!renderTimer) renderTimer=setTimeout(()=>{ renderTimer=null; if($('view').value==='stream') { $('raw-content').textContent=textPreview; scrollBottom(); } },80); }
 function scrollBottom() { const el=$('stream-content'); if(el.scrollHeight-el.scrollTop-el.clientHeight<300) el.scrollTop=el.scrollHeight; }
 function syncCapture() {
-  const name=currentFile(); $('download').hidden=!name; if(name) { $('download').href=fileURL(name,true); $('download').download=name; }
+  const name=currentFile(); $('download').hidden=!name; if(name) { $('download').href=fileURL(name,true); $('download').download=name.split('/').pop(); }
   if(!name) { closeTail(); state.tailName=null; resetPreview(); $('stream-status').textContent='Waiting for capture file…'; return; }
   if($('view').value!=='stream') { closeTail(); loadRaw(); return; }
   if(state.tailName!==name) { closeTail(); state.tailName=name; resetPreview(); if(state.following)startTail();else $('stream-status').textContent='Stream paused'; }
@@ -93,8 +103,9 @@ async function loadRaw() {
   } catch(error) { if(seq===state.rawSeq) notice('detail-problem',error.message); }
 }
 
-for(const mode of ['requests','files']) $(mode+'-tab').onclick=()=>{ state.mode=mode; state.offset=0; for(const value of ['requests','files']) { $(value+'-tab').classList.toggle('selected',value===mode); $(value+'-tab').setAttribute('aria-pressed',String(value===mode)); } $('state').disabled=mode==='files'; $('search').placeholder=mode==='files'?'Search filenames, including archives…':'Search URL, ID, method, status…'; refresh(); };
+for(const mode of ['requests','files']) $(mode+'-tab').onclick=()=>{ state.mode=mode; state.offset=0; for(const value of ['requests','files']) { $(value+'-tab').classList.toggle('selected',value===mode); $(value+'-tab').setAttribute('aria-pressed',String(value===mode)); } $('state').disabled=mode==='files'; $('stats').hidden=mode==='files'; $('search').placeholder=mode==='files'?'Search filenames, including archives…':'Search URL, ID, method, status…'; refresh(); };
 let searchTimer; $('search').oninput=()=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>{state.offset=0;refresh();},200); }; $('state').onchange=()=>{state.offset=0;refresh();};
+$('day').onchange=()=>{state.offset=0;refresh();};
 $('previous').onclick=()=>{state.offset=Math.max(0,state.offset-100);refresh();}; $('next').onclick=()=>{state.offset+=100;refresh();}; $('refresh').onclick=()=>{refresh();if(state.key) select(state.key,true);};
 $('pause').onclick=()=>{state.paused=!state.paused;$('pause').textContent=state.paused?'Resume updates':'Pause updates';$('connection').textContent=state.paused?'Updates paused':'Live';if(!state.paused){refresh();if(state.key)select(state.key,true);}};
 for(const direction of ['request','response']) $(direction+'-direction').onclick=()=>{ state.direction=direction; state.rawOffset=0; for(const value of ['request','response']) { $(value+'-direction').classList.toggle('selected',value===direction); $(value+'-direction').setAttribute('aria-pressed',String(value===direction)); } syncCapture(); };

@@ -1278,6 +1278,8 @@ func TestHTTPProxyServerMITMLogsHTTPSBodies(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
+	metadataPath, _ := waitForFileLogEvents(t, logDir, 4)
+	logDir = filepath.Dir(metadataPath)
 	files, err := os.ReadDir(logDir)
 	if err != nil {
 		t.Fatalf("failed to read log directory: %v", err)

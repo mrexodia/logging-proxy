@@ -158,7 +158,7 @@ func TestWebSocketForwardingAndExactCapture(t *testing.T) {
 				t.Fatal(err)
 			}
 			if strings.Contains(mode, "disabled") || strings.Contains(mode, "abandoning") {
-				entries, _ := filepath.Glob(filepath.Join(dir, "*.bin"))
+				entries, _ := filepath.Glob(filepath.Join(dir, "*", "*.bin"))
 				if len(entries) != 0 {
 					t.Fatal("disabled logger wrote captures")
 				}
@@ -166,7 +166,7 @@ func TestWebSocketForwardingAndExactCapture(t *testing.T) {
 			}
 			deadline := time.Now().Add(3 * time.Second)
 			for {
-				files, _ := filepath.Glob(filepath.Join(dir, "*_metadata.jsonl"))
+				files, _ := filepath.Glob(filepath.Join(dir, "*", "*_metadata.jsonl"))
 				if len(files) == 1 {
 					data, _ := os.ReadFile(files[0])
 					if bytes.Contains(data, []byte(`"event":"request_completed"`)) && bytes.Contains(data, []byte(`"event":"response_completed"`)) {
@@ -179,7 +179,7 @@ func TestWebSocketForwardingAndExactCapture(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 			for direction, frame := range map[string][]byte{"request": clientFrame, "response": serverFrame} {
-				files, _ := filepath.Glob(filepath.Join(dir, "*_"+direction+".bin"))
+				files, _ := filepath.Glob(filepath.Join(dir, "*", "*_"+direction+".bin"))
 				if len(files) != 1 {
 					t.Fatalf("unexpected %s file count: %d", direction, len(files))
 				}

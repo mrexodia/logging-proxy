@@ -207,7 +207,14 @@ go build -o proxy-webui.exe ./cmd/proxy-webui
 The interface includes:
 
 - Live request arrivals and updates, with searchable, paginated history across
-  every transaction metadata file in the selected directory.
+  every transaction metadata file in the selected directory and its `YYYY-MM-DD`
+  subdirectories. Existing root-level logs remain visible alongside daily logs.
+- An **All days** / specific-day filter for both Requests and All files. New days
+  appear automatically as captures arrive. Request totals reflect the selected day.
+  Daily folder names determine the capture day (so transactions crossing midnight
+  stay together); flat legacy requests use their start timestamp's timezone.
+  Flat files use their filename's date, falling back to modification time when
+  no date is present.
 - Request and response headers, bodies, lifecycle metadata, status and sizes.
 - SSE event decoding and bidirectional WebSocket frame inspection. Pause/resume
   and reconnect continue from byte offsets in the original capture files.
@@ -314,7 +321,11 @@ forward proxy's goproxy-managed response transport.
 
 ## Logging
 
-Logs are written to `logging.log_dir`.
+New logs are written to `logging.log_dir/YYYY-MM-DD/`, with daily directories
+created automatically. The date uses the request start timestamp and its timezone;
+request, response, and metadata stay together even across midnight. Existing logs
+are not moved. Point the web UI's `-log-dir` at the parent log directory to browse
+all days, or at a single daily directory to inspect only that day.
 
 Captured files:
 - `*_request.bin`

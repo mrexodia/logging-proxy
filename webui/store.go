@@ -35,6 +35,7 @@ type Event struct {
 }
 
 type File struct {
+	Day      string    `json:"day"`
 	Name     string    `json:"name"`
 	Size     int64     `json:"size"`
 	Modified time.Time `json:"modified"`
@@ -42,6 +43,7 @@ type File struct {
 }
 
 type Transaction struct {
+	Day           string                `json:"day"`
 	Key           string                `json:"key"`
 	Metadata      proxy.RequestMetadata `json:"metadata"`
 	Started       time.Time             `json:"started"`
@@ -124,13 +126,65 @@ func allowedFile(name string) bool {
 		(strings.HasSuffix(name, ".bin") || strings.HasSuffix(name, "_metadata.jsonl") || strings.HasSuffix(name, "_metadata.json") || strings.HasSuffix(name, ".zip"))
 }
 
-// Open only regular files immediately inside the selected log directory. In
-// particular, never follow a symlink planted in a log directory.
+func validDay(day string) bool {
+	_, err := time.Parse("2006-01-02", day)
+	return len(day) == 10 && err == nil
+}
+
+// API paths use forward slashes and allow only a basename or YYYY-MM-DD/basename.
+func allowedPath(name string) bool {
+	parts := strings.Split(name, "/")
+	return (len(parts) == 1 && allowedFile(parts[0])) ||
+		(len(parts) == 2 && validDay(parts[0]) && allowedFile(parts[1]))
+}
+
+func (s *Store) fileDay(name string, fallback time.Time) string {
+	if parts := strings.Split(name, "/"); len(parts) == 2 {
+		return parts[0]
+	}
+	if day := filepath.Base(s.dir); validDay(day) {
+		return day
+	}
+	// Legacy flat captures encode their date in the filename. Archives and
+	// other orphan files without a date use their modification time.
+	if len(name) >= 10 && validDay(name[:10]) {
+		return name[:10]
+	}
+	return fallback.Format("2006-01-02")
+}
+
+// Body filenames in metadata are relative to that metadata's directory, never
+// arbitrary paths supplied by a capture.
+func metadataBodyPath(metadataName, bodyName string) string {
+	if !allowedFile(bodyName) {
+		return ""
+	}
+	if slash := strings.IndexByte(metadataName, '/'); slash >= 0 {
+		return metadataName[:slash+1] + bodyName
+	}
+	return bodyName
+}
+
+// Open regular files in the root or one daily directory. Reject symlinks in
+// both path components and check that their identities did not change on open.
 func (s *Store) open(name string) (*os.File, error) {
-	if !allowedFile(name) {
+	if !allowedPath(name) {
 		return nil, os.ErrNotExist
 	}
-	path := filepath.Join(s.dir, name)
+	var parent os.FileInfo
+	parentPath := s.dir
+	if slash := strings.IndexByte(name, '/'); slash >= 0 {
+		parentPath = filepath.Join(s.dir, name[:slash])
+		var err error
+		parent, err = os.Lstat(parentPath)
+		if err != nil {
+			return nil, err
+		}
+		if !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 {
+			return nil, os.ErrPermission
+		}
+	}
+	path := filepath.Join(s.dir, filepath.FromSlash(name))
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -147,7 +201,73 @@ func (s *Store) open(name string) (*os.File, error) {
 		f.Close()
 		return nil, os.ErrPermission
 	}
+	if parent != nil {
+		afterParent, err := os.Lstat(parentPath)
+		if err != nil || !os.SameFile(parent, afterParent) || afterParent.Mode()&os.ModeSymlink != 0 {
+			f.Close()
+			return nil, os.ErrPermission
+		}
+	}
 	return f, nil
+}
+
+// Read just the root and real YYYY-MM-DD directories, not arbitrary subtrees.
+func (s *Store) captureFiles() ([]File, error) {
+	var files []File
+	var scan func(string) error
+	scan = func(day string) error {
+		dir := filepath.Join(s.dir, day)
+		var before os.FileInfo
+		if day != "" {
+			var err error
+			before, err = os.Lstat(dir)
+			if os.IsNotExist(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+				return nil
+			}
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		if before != nil {
+			after, err := os.Lstat(dir)
+			if err != nil || !os.SameFile(before, after) || after.Mode()&os.ModeSymlink != 0 {
+				return os.ErrPermission
+			}
+		}
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			if day == "" && entry.IsDir() && validDay(entry.Name()) {
+				if err := scan(entry.Name()); err != nil {
+					return err
+				}
+				continue
+			}
+			if !allowedFile(entry.Name()) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			name := entry.Name()
+			if day != "" {
+				name = day + "/" + name
+			}
+			files = append(files, File{Name: name, Day: s.fileDay(name, info.ModTime()), Size: info.Size(), Modified: info.ModTime()})
+		}
+		return nil
+	}
+	err := scan("")
+	return files, err
 }
 
 // Scan caches unchanged metadata; growing bodies are only stat'ed, never read.
@@ -155,7 +275,7 @@ func (s *Store) open(name string) (*os.File, error) {
 func (s *Store) Scan() error {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
-	entries, err := os.ReadDir(s.dir)
+	entries, err := s.captureFiles()
 	if err != nil {
 		s.mu.Lock()
 		s.problem = "Cannot read log directory: " + err.Error()
@@ -165,15 +285,7 @@ func (s *Store) Scan() error {
 	}
 	files := make(map[string]File)
 	cache := make(map[string]cachedMetadata)
-	for _, entry := range entries {
-		if !allowedFile(entry.Name()) || entry.Type()&os.ModeSymlink != 0 {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		file := File{Name: entry.Name(), Size: info.Size(), Modified: info.ModTime()}
+	for _, file := range entries {
 		if strings.HasSuffix(file.Name, "_metadata.jsonl") || strings.HasSuffix(file.Name, "_metadata.json") {
 			cached, ok := s.cache[file.Name]
 			if !ok || !cached.complete() || cached.file.Size != file.Size || !cached.file.Modified.Equal(file.Modified) {
@@ -227,7 +339,7 @@ func (s *Store) Scan() error {
 		if strings.HasSuffix(name, ".jsonl") {
 			for _, event := range cached.events {
 				if event.Metadata.ID != "" {
-					modernIDs[event.Metadata.ID] = true
+					modernIDs[filepath.Dir(name)+"/"+event.Metadata.ID] = true
 				}
 			}
 		}
@@ -241,7 +353,7 @@ func (s *Store) Scan() error {
 		cached := cache[name]
 		groupID := name
 		if len(cached.events) > 0 && cached.events[0].Metadata.ID != "" {
-			groupID = cached.events[0].Metadata.ID
+			groupID = filepath.Dir(name) + "/" + cached.events[0].Metadata.ID
 		}
 		if strings.HasSuffix(name, ".json") && modernIDs[groupID] {
 			continue
@@ -249,7 +361,7 @@ func (s *Store) Scan() error {
 		transaction := groups[groupID]
 		if transaction == nil {
 			hash := sha256.Sum256([]byte(groupID))
-			transaction = &Transaction{Key: hex.EncodeToString(hash[:16]), Started: cached.file.Modified, State: "unfinished"}
+			transaction = &Transaction{Key: hex.EncodeToString(hash[:16]), Day: cached.file.Day, Started: cached.file.Modified, State: "unfinished"}
 			groups[groupID] = transaction
 		}
 		transaction.MetadataFiles = append(transaction.MetadataFiles, name)
@@ -297,6 +409,11 @@ func (s *Store) Scan() error {
 		}
 		if t.State != "error" && requestDone && responseDone {
 			t.State = "completed"
+		}
+		// Daily folders are authoritative (including streams crossing midnight).
+		// Flat legacy transactions use the original request timestamp timezone.
+		if len(t.Events) > 0 && len(t.MetadataFiles) > 0 && !strings.Contains(t.MetadataFiles[0], "/") && !validDay(filepath.Base(s.dir)) && !t.Started.IsZero() {
+			t.Day = t.Started.Format("2006-01-02")
 		}
 		t.RequestBytes = files[t.RequestFile].Size
 		t.ResponseBytes = files[t.ResponseFile].Size
@@ -351,6 +468,7 @@ func (s *Store) readMetadata(file File) cachedMetadata {
 				result.problem = "Invalid metadata line; original file retained"
 				continue
 			}
+			event.Filename = metadataBodyPath(file.Name, event.Filename)
 			result.events = append(result.events, event)
 		}
 		if len(lines[len(lines)-1]) > 0 {
@@ -371,8 +489,9 @@ func (s *Store) readMetadata(file File) cachedMetadata {
 		}
 	}
 	if event.Filename == "" {
-		event.Filename = strings.TrimSuffix(file.Name, "_metadata.json") + ".bin"
+		event.Filename = strings.TrimSuffix(filepath.Base(file.Name), "_metadata.json") + ".bin"
 	}
+	event.Filename = metadataBodyPath(file.Name, event.Filename)
 	if event.StartedAt.IsZero() {
 		event.StartedAt = event.Timestamp
 	}

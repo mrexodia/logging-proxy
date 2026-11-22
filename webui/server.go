@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,18 +124,52 @@ func page(r *http.Request) (int, int, error) {
 	return limit, offset, nil
 }
 
+// Called with s.mu held. Options are independent of the current search/filter.
+func (s *Store) daysLocked() []string {
+	unique := make(map[string]bool)
+	for _, f := range s.files {
+		unique[f.Day] = true
+	}
+	for _, t := range s.transactions {
+		unique[t.Day] = true
+	}
+	days := make([]string, 0, len(unique))
+	for day := range unique {
+		days = append(days, day)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(days)))
+	return days
+}
+
+func dayFilter(w http.ResponseWriter, r *http.Request) (string, bool) {
+	day := r.URL.Query().Get("day")
+	if day != "" && !validDay(day) {
+		http.Error(w, "invalid day (expected YYYY-MM-DD)", http.StatusBadRequest)
+		return "", false
+	}
+	return day, true
+}
+
 func (s *Store) list(w http.ResponseWriter, r *http.Request) {
 	limit, offset, err := page(r)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	day, ok := dayFilter(w, r)
+	if !ok {
+		return
+	}
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	state, method := r.URL.Query().Get("state"), r.URL.Query().Get("method")
 	s.mu.RLock()
 	items := make([]Transaction, 0, limit)
-	total, unfinished, errors := 0, 0, 0
+	total, all, unfinished, errors := 0, 0, 0, 0
 	for _, t := range s.transactions {
+		if day != "" && t.Day != day {
+			continue
+		}
+		all++
 		if t.State == "unfinished" {
 			unfinished++
 		}
@@ -157,7 +192,7 @@ func (s *Store) list(w http.ResponseWriter, r *http.Request) {
 		}
 		total++
 	}
-	result := map[string]any{"items": items, "total": total, "all": len(s.transactions), "unfinished": unfinished, "errors": errors, "revision": s.revision, "problem": s.problem}
+	result := map[string]any{"items": items, "total": total, "all": all, "unfinished": unfinished, "errors": errors, "revision": s.revision, "problem": s.problem, "days": s.daysLocked()}
 	s.mu.RUnlock()
 	writeJSON(w, result)
 }
@@ -168,15 +203,19 @@ func (s *Store) listFiles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	day, ok := dayFilter(w, r)
+	if !ok {
+		return
+	}
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	s.mu.RLock()
 	files := make([]File, 0, len(s.files))
 	for _, f := range s.files {
-		if strings.Contains(strings.ToLower(f.Name), query) {
+		if (day == "" || f.Day == day) && strings.Contains(strings.ToLower(f.Name), query) {
 			files = append(files, f)
 		}
 	}
-	problem := s.problem
+	problem, days := s.problem, s.daysLocked()
 	s.mu.RUnlock()
 	sort.Slice(files, func(i, j int) bool { return files[i].Name > files[j].Name })
 	total := len(files)
@@ -187,7 +226,7 @@ func (s *Store) listFiles(w http.ResponseWriter, r *http.Request) {
 	if end > total {
 		end = total
 	}
-	writeJSON(w, map[string]any{"items": files[offset:end], "total": total, "problem": problem})
+	writeJSON(w, map[string]any{"items": files[offset:end], "total": total, "problem": problem, "days": days})
 }
 
 func offsetValue(r *http.Request) (int64, error) {
@@ -220,7 +259,7 @@ func (s *Store) file(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(name)))
 		http.ServeContent(w, r, name, info.ModTime(), f)
 		return
 	}
